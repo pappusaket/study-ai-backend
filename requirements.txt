@@ -1,2 +1,8 @@
 fastapi
 uvicorn
+google-generativeai
+chromadb
+sentence-transformers
+pypdf
+pydantic
+python-multipart
