@@ -1,9 +1,4 @@
-fastapi==0.109.0         # Pydantic v1 के साथ संगत अंतिम स्थिर संस्करण
-uvicorn==0.24.0          # स्थिर, आधुनिक संस्करण
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==1.10.12
 python-multipart==0.0.6
-google-generativeai==0.3.0
-chromadb==0.4.15
-sentence-transformers==2.2.2
-pypdf==3.17.0
-python-dotenv==1.0.0
-pydantic==1.10.13        # Pydantic v1, Rust error से बचने के लिए
