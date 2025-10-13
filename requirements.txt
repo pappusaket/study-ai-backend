@@ -1,5 +1,4 @@
-# requirements.txt - Stable for Render Deployment
-fastapi==0.109.0         # Pydantic v1 के साथ संगत
+fastapi==0.109.0         # Pydantic v1 के साथ संगत अंतिम स्थिर संस्करण
 uvicorn==0.24.0          # स्थिर, आधुनिक संस्करण
 python-multipart==0.0.6
 google-generativeai==0.3.0
