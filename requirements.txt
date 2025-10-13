@@ -1,4 +1,10 @@
-fastapi==0.65.0
-uvicorn==0.13.0
-pydantic==1.7.0
-python-multipart==0.0.5
+# requirements.txt - Stable for Render Deployment
+fastapi==0.109.0         # Pydantic v1 के साथ संगत
+uvicorn==0.24.0          # स्थिर, आधुनिक संस्करण
+python-multipart==0.0.6
+google-generativeai==0.3.0
+chromadb==0.4.15
+sentence-transformers==2.2.2
+pypdf==3.17.0
+python-dotenv==1.0.0
+pydantic==1.10.13        # Pydantic v1, Rust error से बचने के लिए
