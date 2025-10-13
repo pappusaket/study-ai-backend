@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
@@ -58,6 +58,7 @@ async def query_documents(request: QueryRequest):
         USER QUESTION: {request.question}
         
         You are a helpful AI assistant. Answer the question in {request.language}.
+        Keep the answer simple and clear.
         
         ANSWER:
         """
@@ -79,7 +80,7 @@ async def query_documents(request: QueryRequest):
 async def ingest_pdf():
     return {
         "success": True,
-        "message": "PDF upload endpoint ready! Basic version deployed successfully."
+        "message": "PDF upload will be available in next update. Basic AI chat is working!"
     }
 
 if __name__ == "__main__":
