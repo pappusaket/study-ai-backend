@@ -724,6 +724,9 @@ async def startup_event():
     """Start background tasks on startup"""
     asyncio.create_task(nightly_processor())
 
+# PORT handling for Render
+PORT = int(os.environ.get("PORT", 8000))
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
