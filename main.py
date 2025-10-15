@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, F
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
-import pinecone
+from pinecone import Pinecone, ServerlessSpec
 import hashlib
 import io
 from pypdf import PdfReader
@@ -31,23 +31,27 @@ app.add_middleware(
 # FREE APIs Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")
 
-if not GEMINI_API_KEY or not PINECONE_API_KEY or not PINECONE_ENV:
+if not GEMINI_API_KEY or not PINECONE_API_KEY:
     raise Exception("Missing required environment variables")
 
 genai.configure(api_key=GEMINI_API_KEY)
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
 
-# Create Pinecone index
+# ✅ SERVERLESS Pinecone Initialization
+pc = Pinecone(api_key=PINECONE_API_KEY)
 index_name = "study-ai-index"
-if index_name not in pinecone.list_indexes():
-    pinecone.create_index(
-        index_name,
+
+# Check if index exists, if not create it
+existing_indexes = [index["name"] for index in pc.list_indexes()]
+if index_name not in existing_indexes:
+    pc.create_index(
+        name=index_name,
         dimension=768,
-        metric="cosine"
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")  # Adjust region as per your Pinecone
     )
-index = pinecone.Index(index_name)
+
+index = pc.Index(index_name)
 
 # SQLite Database Setup
 DB_PATH = "study_ai.db"
@@ -383,8 +387,8 @@ async def process_pdf_batch(pdf_batch):
                     content=chunk
                 )['embedding']
                 
-                # Store in Pinecone
-                index.upsert([(
+                # Store in Pinecone (Serverless compatible)
+                index.upsert(vectors=[(
                     f"{pdf_data['user_id']}_{pdf_data['pdf_id']}_{i}",
                     embedding,
                     {
@@ -510,7 +514,7 @@ async def delete_pdf(pdf_id: int, user_id: str):
         if not pdf_info:
             raise HTTPException(status_code=404, detail="PDF not found")
         
-        # Delete from Pinecone
+        # Delete from Pinecone (Serverless compatible)
         vectors_to_delete = []
         for i in range(1000):  # Assuming max 1000 chunks per PDF
             vector_id = f"{user_id}_{pdf_id}_{i}"
@@ -552,7 +556,7 @@ async def ask_question(request: QuestionRequest):
             content=request.question
         )['embedding']
         
-        # Search in Pinecone
+        # Search in Pinecone (Serverless compatible)
         results = index.query(
             vector=question_embedding,
             top_k=5,
@@ -724,9 +728,6 @@ async def startup_event():
     """Start background tasks on startup"""
     asyncio.create_task(nightly_processor())
 
-# PORT handling for Render
-PORT = int(os.environ.get("PORT", 8000))
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
