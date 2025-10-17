@@ -13,7 +13,7 @@ from typing import Optional
 import asyncio
 
 # ✅ PEHLE APP CREATE KARO
-app = FastAPI(title="Study AI - With Vector Search")
+app = FastAPI(title="Study AI - Complete Version")
 
 # CORS
 app.add_middleware(
@@ -28,33 +28,46 @@ app.add_middleware(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
+print(f"GEMINI_API_KEY: {'Set' if GEMINI_API_KEY else 'Not Set'}")
+print(f"PINECONE_API_KEY: {'Set' if PINECONE_API_KEY else 'Not Set'}")
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Pinecone Setup (Optional - won't break if not configured)
+# Pinecone Setup with better error handling
+pinecone_configured = False
+index = None
+
 try:
     if PINECONE_API_KEY:
         from pinecone import Pinecone, ServerlessSpec
+        print("Initializing Pinecone...")
+        
         pc = Pinecone(api_key=PINECONE_API_KEY)
         index_name = "study-ai-index"
         
         # Check if index exists
         existing_indexes = [index["name"] for index in pc.list_indexes()]
+        print(f"Existing indexes: {existing_indexes}")
+        
         if index_name not in existing_indexes:
+            print(f"Creating index: {index_name}")
             pc.create_index(
                 name=index_name,
                 dimension=768,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1")
             )
+            print("Index created successfully")
+        else:
+            print("Index already exists")
         
         index = pc.Index(index_name)
         pinecone_configured = True
-    else:
-        pinecone_configured = False
-        index = None
+        print("✅ Pinecone configured successfully!")
+        
 except Exception as e:
-    print(f"Pinecone initialization failed: {e}")
+    print(f"❌ Pinecone initialization failed: {e}")
     pinecone_configured = False
     index = None
 
@@ -83,6 +96,7 @@ def init_db():
     
     conn.commit()
     conn.close()
+    print("✅ Database initialized")
 
 # Initialize database
 init_db()
@@ -119,6 +133,9 @@ def extract_text_from_pdf(pdf_content):
 
 def split_text_into_chunks(text, chunk_size=500, overlap=50):
     """Split text into chunks for vector storage"""
+    if not text:
+        return []
+        
     words = text.split()
     chunks = []
     
@@ -133,35 +150,44 @@ def split_text_into_chunks(text, chunk_size=500, overlap=50):
 async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
     """Process PDF and store in vector database"""
     if not pinecone_configured:
+        print("Pinecone not configured, skipping vector processing")
         return 0
     
     try:
+        print(f"Processing PDF {pdf_id} for vectors...")
         text = extract_text_from_pdf(file_content)
         if not text:
+            print("No text extracted from PDF")
             return 0
             
         chunks = split_text_into_chunks(text)
+        print(f"Created {len(chunks)} chunks from PDF")
         
         # Store each chunk in Pinecone
         for i, chunk in enumerate(chunks):
-            # Create embedding
-            embedding = genai.embed_content(
-                model="models/embedding-001",
-                content=chunk
-            )['embedding']
-            
-            # Store in Pinecone
-            index.upsert(vectors=[(
-                f"{user_id}_{pdf_id}_{i}",
-                embedding,
-                {
-                    "text": chunk,
-                    "filename": filename,
-                    "user_id": user_id,
-                    "pdf_id": pdf_id,
-                    "chunk_index": i
-                }
-            )])
+            try:
+                # Create embedding
+                embedding = genai.embed_content(
+                    model="models/embedding-001",
+                    content=chunk
+                )['embedding']
+                
+                # Store in Pinecone
+                index.upsert(vectors=[(
+                    f"{user_id}_{pdf_id}_{i}",
+                    embedding,
+                    {
+                        "text": chunk,
+                        "filename": filename,
+                        "user_id": user_id,
+                        "pdf_id": pdf_id,
+                        "chunk_index": i
+                    }
+                )])
+                
+            except Exception as e:
+                print(f"Error processing chunk {i}: {e}")
+                continue
         
         # Update database
         conn = sqlite3.connect(DB_PATH)
@@ -173,10 +199,11 @@ async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
         conn.commit()
         conn.close()
         
+        print(f"✅ PDF {pdf_id} processed successfully with {len(chunks)} chunks")
         return len(chunks)
         
     except Exception as e:
-        print(f"Error processing PDF for vectors: {e}")
+        print(f"❌ Error processing PDF for vectors: {e}")
         return 0
 
 def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
@@ -196,11 +223,13 @@ def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
         
         conn.commit()
         pdf_id = cursor.lastrowid
+        print(f"✅ PDF added to database with ID: {pdf_id}")
     except sqlite3.IntegrityError:
         # Duplicate file
         cursor.execute('SELECT id FROM pdf_files WHERE file_hash = ?', (file_hash,))
         result = cursor.fetchone()
         pdf_id = result[0] if result else None
+        print(f"⚠️ Duplicate PDF found, ID: {pdf_id}")
     finally:
         conn.close()
     
@@ -236,32 +265,35 @@ def get_user_pdfs(user_id):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return """
+    pinecone_status = "✅ ACTIVE" if pinecone_configured else "❌ INACTIVE"
+    pinecone_color = "#00ff00" if pinecone_configured else "#ff4444"
+    
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Study AI - Status</title>
         <style>
-            body { 
+            body {{ 
                 font-family: Arial, sans-serif; 
                 text-align: center; 
                 padding: 50px; 
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-            }
-            .status-box { 
+            }}
+            .status-box {{ 
                 background: rgba(255,255,255,0.1); 
                 padding: 30px; 
                 border-radius: 15px; 
                 display: inline-block;
                 backdrop-filter: blur(10px);
                 max-width: 700px;
-            }
-            .status { 
+            }}
+            .status {{ 
                 font-size: 24px; 
                 margin: 20px 0; 
-            }
-            .live-dot {
+            }}
+            .live-dot {{
                 display: inline-block;
                 width: 12px;
                 height: 12px;
@@ -269,16 +301,16 @@ async def root():
                 border-radius: 50%;
                 animation: pulse 2s infinite;
                 margin-right: 10px;
-            }
-            @keyframes pulse {
-                0% { opacity: 1; }
-                50% { opacity: 0.5; }
-                100% { opacity: 1; }
-            }
-            .endpoints {
+            }}
+            @keyframes pulse {{
+                0% {{ opacity: 1; }}
+                50% {{ opacity: 0.5; }}
+                100% {{ opacity: 1; }}
+            }}
+            .endpoints {{
                 margin-top: 20px;
-            }
-            a {
+            }}
+            a {{
                 color: #00ff00;
                 text-decoration: none;
                 display: block;
@@ -287,34 +319,34 @@ async def root():
                 background: rgba(0,0,0,0.3);
                 border-radius: 5px;
                 transition: all 0.3s;
-            }
-            a:hover {
+            }}
+            a:hover {{
                 background: rgba(0,0,0,0.5);
                 transform: translateY(-2px);
-            }
-            .feature-badge {
+            }}
+            .feature-badge {{
                 background: #00ff00;
                 color: #333;
                 padding: 4px 8px;
                 border-radius: 12px;
                 font-size: 12px;
                 margin-left: 10px;
-            }
-            .feature-list {
+            }}
+            .feature-list {{
                 display: grid;
                 grid-template-columns: 1fr 1fr;
                 gap: 10px;
                 margin-top: 20px;
-            }
-            .status-indicator {
+            }}
+            .status-indicator {{
                 display: inline-block;
                 padding: 4px 12px;
                 border-radius: 15px;
                 font-size: 12px;
                 margin: 0 5px;
-            }
-            .status-active { background: #00ff00; color: #000; }
-            .status-inactive { background: #ff4444; color: #fff; }
+            }}
+            .status-active {{ background: #00ff00; color: #000; }}
+            .status-inactive {{ background: #ff4444; color: #fff; }}
         </style>
     </head>
     <body>
@@ -326,8 +358,8 @@ async def root():
             
             <div style="margin: 20px 0;">
                 <span class="status-indicator status-active">Gemini AI ✅</span>
-                <span class="status-indicator {% if pinecone_configured %}status-active{% else %}status-inactive{% endif %}">
-                    Vector Search {% if pinecone_configured %}✅{% else %}❌{% endif %}
+                <span class="status-indicator" style="background: {pinecone_color}; color: {'#000' if pinecone_configured else '#fff'}">
+                    Vector Search {pinecone_status}
                 </span>
                 <span class="status-indicator status-active">PDF Processing ✅</span>
             </div>
@@ -338,6 +370,7 @@ async def root():
                 <a href="/health">🔍 Health Check</a>
                 <a href="/docs">📚 API Documentation <span class="feature-badge">NEW</span></a>
                 <a href="/test">🧪 Test Endpoint</a>
+                <a href="/system-status">⚙️ System Status</a>
             </div>
 
             <div style="margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.2); border-radius: 10px;">
@@ -345,13 +378,13 @@ async def root():
                 <div class="feature-list">
                     <p>✅ Smart Q&A System</p>
                     <p>✅ PDF Upload & Storage</p>
-                    <p>✅ Vector Search {% if pinecone_configured %}(Active){% else %}(Optional){% endif %}</p>
+                    <p>✅ Vector Search {'(Active)' if pinecone_configured else '(Ready)'}</p>
                     <p>✅ Multi-language Support</p>
                     <p>✅ Database Storage</p>
                     <p>✅ Context-Aware Answers</p>
                 </div>
                 <p style="font-size: 12px; opacity: 0.8; margin-top: 15px;">
-                    Upload PDFs and ask context-aware questions!
+                    {'🚀 Upload PDFs and ask context-aware questions!' if pinecone_configured else '⚠️ Vector search ready - upload PDFs to enable!'}
                 </p>
             </div>
             
@@ -361,9 +394,9 @@ async def root():
         </div>
 
         <script>
-            function updateTime() {
+            function updateTime() {{
                 document.getElementById('timestamp').textContent = new Date().toLocaleString();
-            }
+            }}
             updateTime();
             setInterval(updateTime, 1000);
         </script>
@@ -376,17 +409,18 @@ async def health():
     gemini_status = "configured" if GEMINI_API_KEY else "not_configured"
     pinecone_status = "configured" if pinecone_configured else "not_configured"
     
+    features = ["Q&A System", "PDF Upload", "Multi-language"]
+    if pinecone_configured:
+        features.append("Vector Search")
+    else:
+        features.append("Basic Search")
+    
     return {
         "status": "healthy", 
         "service": "Study AI",
         "gemini": gemini_status,
         "pinecone": pinecone_status,
-        "features": [
-            "Q&A System", 
-            "PDF Upload", 
-            "Vector Search" if pinecone_configured else "Basic Search",
-            "Multi-language"
-        ]
+        "features": features
     }
 
 @app.get("/test")
@@ -394,7 +428,8 @@ async def test():
     return {
         "test": "passed", 
         "message": "Everything is working!",
-        "vector_search": "available" if pinecone_configured else "not_configured"
+        "vector_search": "active" if pinecone_configured else "not_configured",
+        "gemini_ai": "active" if GEMINI_API_KEY else "inactive"
     }
 
 @app.post("/ask")
@@ -410,6 +445,7 @@ async def ask_question(request: QuestionRequest):
         # If vector search is enabled and user wants PDF context
         if pinecone_configured and request.use_pdf_context:
             try:
+                print(f"Searching vectors for question: {request.question}")
                 # Create question embedding
                 question_embedding = genai.embed_content(
                     model="models/embedding-001",
@@ -428,6 +464,9 @@ async def ask_question(request: QuestionRequest):
                     context_chunks = [match['metadata']['text'] for match in results['matches']]
                     context = "\n\nRelevant context from your documents:\n" + "\n---\n".join(context_chunks)
                     sources_used = len(results['matches'])
+                    print(f"Found {sources_used} relevant chunks")
+                else:
+                    print("No relevant chunks found")
             except Exception as e:
                 print(f"Vector search error: {e}")
                 # Continue without context
@@ -439,6 +478,7 @@ async def ask_question(request: QuestionRequest):
         {context}
         
         Provide a comprehensive answer that would help a student understand the concept.
+        If there is relevant context from documents, use it to enhance your answer.
         """
         
         model = genai.GenerativeModel('gemini-pro')
@@ -451,7 +491,7 @@ async def ask_question(request: QuestionRequest):
             "user_id": request.user_id,
             "context_used": sources_used > 0,
             "sources_used": sources_used,
-            "vector_search": pinecone_configured
+            "vector_search": "active" if pinecone_configured else "inactive"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -521,7 +561,8 @@ async def get_user_pdfs_list(user_id: str):
             "user_id": user_id,
             "pdfs": pdfs,
             "total_pdfs": len(pdfs),
-            "vector_search_enabled": pinecone_configured
+            "vector_search_enabled": pinecone_configured,
+            "processed_pdfs": sum(1 for pdf in pdfs if pdf['processed'])
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching PDFs: {str(e)}")
@@ -546,6 +587,11 @@ async def system_status():
         "vector_database": "active" if pinecone_configured else "inactive",
         "pdf_processing": "active",
         "database": "active",
+        "api_keys": {
+            "gemini_set": bool(GEMINI_API_KEY),
+            "pinecone_set": bool(PINECONE_API_KEY),
+            "pinecone_connected": pinecone_configured
+        },
         "features": {
             "smart_qa": True,
             "pdf_upload": True,
@@ -553,6 +599,26 @@ async def system_status():
             "context_aware": pinecone_configured
         }
     }
+
+@app.get("/debug-pinecone")
+async def debug_pinecone():
+    """Debug Pinecone connection"""
+    if not pinecone_configured:
+        return {"status": "not_configured", "message": "Pinecone not configured"}
+    
+    try:
+        # Try to get index stats
+        stats = index.describe_index_stats()
+        return {
+            "status": "connected",
+            "index_stats": stats,
+            "message": "Pinecone is properly connected"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Pinecone connection error: {str(e)}"
+        }
 
 if __name__ == "__main__":
     import uvicorn
