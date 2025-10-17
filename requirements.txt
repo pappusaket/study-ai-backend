@@ -2,8 +2,9 @@ fastapi==0.104.1
 uvicorn==0.24.0
 python-multipart==0.0.6
 google-generativeai==0.3.0
-pinecone-client==3.2.2  # ✅ Updated for Serverless
+pinecone-client==3.2.2
 pypdf==3.17.0
 python-dotenv==1.0.0
 schedule==1.2.0
 aiofiles==23.2.1
+pydantic==2.7.1
