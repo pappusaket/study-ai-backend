@@ -1,5 +1,21 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+import os
 
+# ✅ PEHLE APP CREATE KARO
+app = FastAPI(title="Study AI - Basic")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ✅ AB @app.get USE KARO
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
@@ -42,8 +58,6 @@ async def root():
             }
             .endpoints {
                 margin-top: 20px;
-                text-align: left;
-                display: inline-block;
             }
             a {
                 color: #00ff00;
@@ -53,9 +67,6 @@ async def root():
                 padding: 10px;
                 background: rgba(0,0,0,0.3);
                 border-radius: 5px;
-            }
-            a:hover {
-                background: rgba(0,0,0,0.5);
             }
         </style>
     </head>
@@ -68,7 +79,6 @@ async def root():
             <p>Server is active and responding to requests</p>
             
             <div class="endpoints">
-                <strong>API Endpoints:</strong>
                 <a href="/health">🔍 Health Check</a>
                 <a href="/docs">📚 API Documentation</a>
                 <a href="/test">🧪 Test Endpoint</a>
@@ -80,27 +90,35 @@ async def root():
         </div>
 
         <script>
-            // Live timestamp
             function updateTime() {
                 document.getElementById('timestamp').textContent = new Date().toLocaleString();
             }
             updateTime();
             setInterval(updateTime, 1000);
-            
-            // Live status check
-            async function checkStatus() {
-                try {
-                    const response = await fetch('/health');
-                    if (response.ok) {
-                        console.log('✅ Server is healthy');
-                    }
-                } catch (error) {
-                    console.log('❌ Server connection issue');
-                }
-            }
-            // Check every 30 seconds
-            setInterval(checkStatus, 30000);
         </script>
     </body>
     </html>
     """
+
+# Configure Gemini
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+
+@app.get("/health")
+async def health():
+    gemini_status = "configured" if GEMINI_API_KEY else "not_configured"
+    return {
+        "status": "healthy", 
+        "service": "Study AI",
+        "gemini": gemini_status
+    }
+
+@app.get("/test")
+async def test():
+    return {"test": "passed", "message": "Everything is working!"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
