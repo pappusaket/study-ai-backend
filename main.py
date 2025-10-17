@@ -10,9 +10,10 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Optional
+import asyncio
 
 # ✅ PEHLE APP CREATE KARO
-app = FastAPI(title="Study AI - With PDF Support")
+app = FastAPI(title="Study AI - With Vector Search")
 
 # CORS
 app.add_middleware(
@@ -23,10 +24,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure Gemini
+# Configure APIs
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
+# Pinecone Setup (Optional - won't break if not configured)
+try:
+    if PINECONE_API_KEY:
+        from pinecone import Pinecone, ServerlessSpec
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        index_name = "study-ai-index"
+        
+        # Check if index exists
+        existing_indexes = [index["name"] for index in pc.list_indexes()]
+        if index_name not in existing_indexes:
+            pc.create_index(
+                name=index_name,
+                dimension=768,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+        
+        index = pc.Index(index_name)
+        pinecone_configured = True
+    else:
+        pinecone_configured = False
+        index = None
+except Exception as e:
+    print(f"Pinecone initialization failed: {e}")
+    pinecone_configured = False
+    index = None
 
 # Database setup
 DB_PATH = "study_ai.db"
@@ -45,7 +75,9 @@ def init_db():
             description TEXT,
             upload_date TEXT NOT NULL,
             status TEXT NOT NULL,
-            file_size INTEGER
+            file_size INTEGER,
+            processed BOOLEAN DEFAULT FALSE,
+            chunks_count INTEGER DEFAULT 0
         )
     ''')
     
@@ -59,6 +91,7 @@ init_db()
 class QuestionRequest(BaseModel):
     question: str
     user_id: str = "default"
+    use_pdf_context: bool = False
 
 class PDFInfo(BaseModel):
     id: int
@@ -67,6 +100,8 @@ class PDFInfo(BaseModel):
     upload_date: str
     status: str
     file_size: int
+    processed: bool
+    chunks_count: int
 
 # Utility Functions
 def extract_text_from_pdf(pdf_content):
@@ -75,10 +110,74 @@ def extract_text_from_pdf(pdf_content):
         pdf_reader = PdfReader(io.BytesIO(pdf_content))
         text = ""
         for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
-        return text
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text.strip()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
+
+def split_text_into_chunks(text, chunk_size=500, overlap=50):
+    """Split text into chunks for vector storage"""
+    words = text.split()
+    chunks = []
+    
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i:i + chunk_size])
+        chunks.append(chunk)
+        if i + chunk_size >= len(words):
+            break
+    
+    return chunks
+
+async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
+    """Process PDF and store in vector database"""
+    if not pinecone_configured:
+        return 0
+    
+    try:
+        text = extract_text_from_pdf(file_content)
+        if not text:
+            return 0
+            
+        chunks = split_text_into_chunks(text)
+        
+        # Store each chunk in Pinecone
+        for i, chunk in enumerate(chunks):
+            # Create embedding
+            embedding = genai.embed_content(
+                model="models/embedding-001",
+                content=chunk
+            )['embedding']
+            
+            # Store in Pinecone
+            index.upsert(vectors=[(
+                f"{user_id}_{pdf_id}_{i}",
+                embedding,
+                {
+                    "text": chunk,
+                    "filename": filename,
+                    "user_id": user_id,
+                    "pdf_id": pdf_id,
+                    "chunk_index": i
+                }
+            )])
+        
+        # Update database
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE pdf_files SET processed = TRUE, chunks_count = ? WHERE id = ?',
+            (len(chunks), pdf_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        return len(chunks)
+        
+    except Exception as e:
+        print(f"Error processing PDF for vectors: {e}")
+        return 0
 
 def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
     """Add PDF info to database"""
@@ -113,7 +212,7 @@ def get_user_pdfs(user_id):
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT id, filename, description, upload_date, status, file_size
+        SELECT id, filename, description, upload_date, status, file_size, processed, chunks_count
         FROM pdf_files 
         WHERE user_id = ? 
         ORDER BY upload_date DESC
@@ -127,7 +226,9 @@ def get_user_pdfs(user_id):
             "description": row[2],
             "upload_date": row[3],
             "status": row[4],
-            "file_size": row[5]
+            "file_size": row[5],
+            "processed": bool(row[6]),
+            "chunks_count": row[7] or 0
         })
     
     conn.close()
@@ -154,7 +255,7 @@ async def root():
                 border-radius: 15px; 
                 display: inline-block;
                 backdrop-filter: blur(10px);
-                max-width: 600px;
+                max-width: 700px;
             }
             .status { 
                 font-size: 24px; 
@@ -205,6 +306,15 @@ async def root():
                 gap: 10px;
                 margin-top: 20px;
             }
+            .status-indicator {
+                display: inline-block;
+                padding: 4px 12px;
+                border-radius: 15px;
+                font-size: 12px;
+                margin: 0 5px;
+            }
+            .status-active { background: #00ff00; color: #000; }
+            .status-inactive { background: #ff4444; color: #fff; }
         </style>
     </head>
     <body>
@@ -213,7 +323,16 @@ async def root():
             <div class="status">
                 <span class="live-dot"></span> LIVE & RUNNING
             </div>
-            <p>Smart Q&A System with PDF Upload Support</p>
+            
+            <div style="margin: 20px 0;">
+                <span class="status-indicator status-active">Gemini AI ✅</span>
+                <span class="status-indicator {% if pinecone_configured %}status-active{% else %}status-inactive{% endif %}">
+                    Vector Search {% if pinecone_configured %}✅{% else %}❌{% endif %}
+                </span>
+                <span class="status-indicator status-active">PDF Processing ✅</span>
+            </div>
+            
+            <p>Advanced AI Study Assistant with Smart Search</p>
             
             <div class="endpoints">
                 <a href="/health">🔍 Health Check</a>
@@ -226,13 +345,13 @@ async def root():
                 <div class="feature-list">
                     <p>✅ Smart Q&A System</p>
                     <p>✅ PDF Upload & Storage</p>
+                    <p>✅ Vector Search {% if pinecone_configured %}(Active){% else %}(Optional){% endif %}</p>
                     <p>✅ Multi-language Support</p>
-                    <p>✅ Fast Response Time</p>
                     <p>✅ Database Storage</p>
-                    <p>✅ File Duplicate Check</p>
+                    <p>✅ Context-Aware Answers</p>
                 </div>
                 <p style="font-size: 12px; opacity: 0.8; margin-top: 15px;">
-                    Use /upload-pdf endpoint to upload study materials
+                    Upload PDFs and ask context-aware questions!
                 </p>
             </div>
             
@@ -255,28 +374,69 @@ async def root():
 @app.get("/health")
 async def health():
     gemini_status = "configured" if GEMINI_API_KEY else "not_configured"
+    pinecone_status = "configured" if pinecone_configured else "not_configured"
+    
     return {
         "status": "healthy", 
         "service": "Study AI",
         "gemini": gemini_status,
-        "features": ["Q&A System", "PDF Upload", "Multi-language", "Database Storage"]
+        "pinecone": pinecone_status,
+        "features": [
+            "Q&A System", 
+            "PDF Upload", 
+            "Vector Search" if pinecone_configured else "Basic Search",
+            "Multi-language"
+        ]
     }
 
 @app.get("/test")
 async def test():
-    return {"test": "passed", "message": "Everything is working!"}
+    return {
+        "test": "passed", 
+        "message": "Everything is working!",
+        "vector_search": "available" if pinecone_configured else "not_configured"
+    }
 
 @app.post("/ask")
 async def ask_question(request: QuestionRequest):
-    """Ask questions and get AI-powered answers"""
+    """Ask questions with optional PDF context"""
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Gemini API key not configured")
     
     try:
+        context = ""
+        sources_used = 0
+        
+        # If vector search is enabled and user wants PDF context
+        if pinecone_configured and request.use_pdf_context:
+            try:
+                # Create question embedding
+                question_embedding = genai.embed_content(
+                    model="models/embedding-001",
+                    content=request.question
+                )['embedding']
+                
+                # Search in Pinecone
+                results = index.query(
+                    vector=question_embedding,
+                    top_k=3,
+                    include_metadata=True,
+                    filter={"user_id": request.user_id}
+                )
+                
+                if results['matches']:
+                    context_chunks = [match['metadata']['text'] for match in results['matches']]
+                    context = "\n\nRelevant context from your documents:\n" + "\n---\n".join(context_chunks)
+                    sources_used = len(results['matches'])
+            except Exception as e:
+                print(f"Vector search error: {e}")
+                # Continue without context
+        
         prompt = f"""
         You are a helpful study assistant. Answer the following question clearly and concisely.
         
         QUESTION: {request.question}
+        {context}
         
         Provide a comprehensive answer that would help a student understand the concept.
         """
@@ -288,7 +448,10 @@ async def ask_question(request: QuestionRequest):
             "question": request.question,
             "answer": response.text,
             "status": "success",
-            "user_id": request.user_id
+            "user_id": request.user_id,
+            "context_used": sources_used > 0,
+            "sources_used": sources_used,
+            "vector_search": pinecone_configured
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -325,26 +488,29 @@ async def upload_pdf(
             "pdf_id": None
         }
     
-    # Extract text (basic processing)
-    try:
-        text = extract_text_from_pdf(file_content)
-        word_count = len(text.split())
-        
-        return {
-            "status": "success",
-            "message": "PDF uploaded successfully",
-            "pdf_id": pdf_id,
-            "filename": file.filename,
-            "file_size": file_size,
-            "word_count": word_count,
-            "description": description
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Error processing PDF: {str(e)}",
-            "pdf_id": pdf_id
-        }
+    # Process PDF for vector storage (in background)
+    chunks_count = 0
+    if pinecone_configured:
+        chunks_count = await process_pdf_for_vectors(
+            pdf_id, file.filename, file_content, user_id
+        )
+    
+    # Extract basic text info
+    text = extract_text_from_pdf(file_content)
+    word_count = len(text.split()) if text else 0
+    
+    return {
+        "status": "success",
+        "message": "PDF uploaded successfully",
+        "pdf_id": pdf_id,
+        "filename": file.filename,
+        "file_size": file_size,
+        "word_count": word_count,
+        "description": description,
+        "vector_processed": chunks_count > 0,
+        "chunks_stored": chunks_count,
+        "vector_search_available": pinecone_configured
+    }
 
 @app.get("/user-pdfs/{user_id}")
 async def get_user_pdfs_list(user_id: str):
@@ -354,28 +520,39 @@ async def get_user_pdfs_list(user_id: str):
         return {
             "user_id": user_id,
             "pdfs": pdfs,
-            "total_pdfs": len(pdfs)
+            "total_pdfs": len(pdfs),
+            "vector_search_enabled": pinecone_configured
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching PDFs: {str(e)}")
 
 @app.get("/ask-simple")
-async def ask_simple(question: str):
+async def ask_simple(question: str, use_context: bool = False):
     """Quick test endpoint for questions"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     
     try:
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(question)
-        
-        return {
-            "question": question,
-            "answer": response.text,
-            "status": "success"
-        }
+        request = QuestionRequest(question=question, use_pdf_context=use_context)
+        return await ask_question(request)
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/system-status")
+async def system_status():
+    """Detailed system status"""
+    return {
+        "gemini_ai": "active" if GEMINI_API_KEY else "inactive",
+        "vector_database": "active" if pinecone_configured else "inactive",
+        "pdf_processing": "active",
+        "database": "active",
+        "features": {
+            "smart_qa": True,
+            "pdf_upload": True,
+            "vector_search": pinecone_configured,
+            "context_aware": pinecone_configured
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn
