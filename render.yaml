@@ -3,5 +3,6 @@ services:
     name: study-ai-backend
     env: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    pythonVersion: "3.11.9"
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
