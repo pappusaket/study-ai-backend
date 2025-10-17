@@ -2,7 +2,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, F
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
-from pinecone import Pinecone, ServerlessSpec
 import hashlib
 import io
 from pypdf import PdfReader
@@ -30,28 +29,19 @@ app.add_middleware(
 
 # FREE APIs Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
-if not GEMINI_API_KEY or not PINECONE_API_KEY:
-    raise Exception("Missing required environment variables")
+if not GEMINI_API_KEY:
+    raise Exception("Missing GEMINI_API_KEY environment variable")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ✅ SERVERLESS Pinecone Initialization
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index_name = "study-ai-index"
+# ✅ TEMPORARY: Pinecone disabled for now
+# PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+# if not PINECONE_API_KEY:
+#     raise Exception("Missing PINECONE_API_KEY environment variable")
 
-# Check if index exists, if not create it
-existing_indexes = [index["name"] for index in pc.list_indexes()]
-if index_name not in existing_indexes:
-    pc.create_index(
-        name=index_name,
-        dimension=768,
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")  # Adjust region as per your Pinecone
-    )
-
-index = pc.Index(index_name)
+print("✅ Gemini AI configured successfully")
+print("ℹ️  Pinecone vector search temporarily disabled")
 
 # SQLite Database Setup
 DB_PATH = "study_ai.db"
@@ -80,6 +70,7 @@ def init_db():
     
     conn.commit()
     conn.close()
+    print("✅ Database initialized successfully")
 
 # Initialize database
 init_db()
@@ -169,26 +160,12 @@ def extract_text_from_pdf(pdf_content):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
-def split_text_into_chunks(text, chunk_size=500, overlap=50):
-    """Split text into chunks"""
-    words = text.split()
-    chunks = []
-    
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-        if i + chunk_size >= len(words):
-            break
-    
-    return chunks
-
-def create_smart_prompt(question, context, question_lang, content_lang, subject, answer_lang):
+def create_smart_prompt(question, question_lang, subject, answer_lang):
     """Create subject and language specific prompt"""
     
     subject_prompts = {
         "maths": """
         QUESTION: {question}
-        CONTEXT: {context}
         
         MATHS ANSWER FORMAT:
         • Direct और concise answer दें
@@ -202,7 +179,6 @@ def create_smart_prompt(question, context, question_lang, content_lang, subject,
         
         "physics": """
         QUESTION: {question}
-        CONTEXT: {context}
         
         PHYSICS ANSWER FORMAT:
         • Conceptual explanation दें
@@ -216,7 +192,6 @@ def create_smart_prompt(question, context, question_lang, content_lang, subject,
         
         "biology": """
         QUESTION: {question}
-        CONTEXT: {context}
         
         BIOLOGY ANSWER FORMAT:
         • Detailed processes explain करें
@@ -230,7 +205,6 @@ def create_smart_prompt(question, context, question_lang, content_lang, subject,
         
         "chemistry": """
         QUESTION: {question}
-        CONTEXT: {context}
         
         CHEMISTRY ANSWER FORMAT:
         • Chemical reactions और equations दें
@@ -243,9 +217,11 @@ def create_smart_prompt(question, context, question_lang, content_lang, subject,
         
         "general": """
         QUESTION: {question}
-        CONTEXT: {context}
         
         Provide a clear, comprehensive answer in {answer_lang}:
+        - Explain concepts simply
+        - Provide examples if relevant
+        - Make it educational and easy to understand
         
         ANSWER:
         """
@@ -253,13 +229,8 @@ def create_smart_prompt(question, context, question_lang, content_lang, subject,
     
     prompt_template = subject_prompts.get(subject, subject_prompts["general"])
     
-    # Add language handling note if needed
-    if question_lang != content_lang:
-        prompt_template += f"\n\nNOTE: Question is in {question_lang} but content is in {content_lang}. Provide answer in {answer_lang}."
-    
     return prompt_template.format(
         question=question,
-        context=context,
         answer_lang=answer_lang
     )
 
@@ -276,7 +247,7 @@ def add_pdf_to_db(filename, file_hash, user_id, description, file_size, subject_
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             filename, file_hash, user_id, description, 
-            datetime.now().isoformat(), 'queued', file_size, subject_category
+            datetime.now().isoformat(), 'stored', file_size, subject_category
         ))
         
         conn.commit()
@@ -369,69 +340,6 @@ def get_pdf_stats(user_id):
     conn.close()
     return stats
 
-# PDF Processing Functions
-async def process_pdf_batch(pdf_batch):
-    """Process a batch of PDFs"""
-    for pdf_data in pdf_batch:
-        try:
-            # Update status to processing
-            update_pdf_status(pdf_data["pdf_id"], "processing")
-            
-            text = extract_text_from_pdf(pdf_data["file_content"])
-            chunks = split_text_into_chunks(text)
-            
-            for i, chunk in enumerate(chunks):
-                # Create embedding
-                embedding = genai.embed_content(
-                    model="models/embedding-001",
-                    content=chunk
-                )['embedding']
-                
-                # Store in Pinecone (Serverless compatible)
-                index.upsert(vectors=[(
-                    f"{pdf_data['user_id']}_{pdf_data['pdf_id']}_{i}",
-                    embedding,
-                    {
-                        "text": chunk,
-                        "filename": pdf_data["filename"],
-                        "user_id": pdf_data["user_id"],
-                        "pdf_id": pdf_data["pdf_id"],
-                        "chunk_index": i,
-                        "processed_at": datetime.now().isoformat()
-                    }
-                )])
-            
-            # Mark as processed
-            update_pdf_status(pdf_data["pdf_id"], "processed", len(chunks))
-            
-        except Exception as e:
-            print(f"Error processing {pdf_data['filename']}: {str(e)}")
-            update_pdf_status(pdf_data["pdf_id"], "failed")
-
-async def nightly_processor():
-    """Nightly PDF processing from 10 PM to 6 AM"""
-    while True:
-        current_time = datetime.now().time()
-        start_time = datetime.strptime("22:00", "%H:%M").time()
-        end_time = datetime.strptime("06:00", "%H:%M").time()
-        
-        if current_time >= start_time or current_time <= end_time:
-            # Process pending PDFs
-            all_pending = []
-            for user_id, pdfs in pending_pdfs_queue.items():
-                all_pending.extend(pdfs)
-            
-            if all_pending:
-                batches = [all_pending[i:i+5] for i in range(0, len(all_pending), 5)]
-                for batch in batches:
-                    await process_pdf_batch(batch)
-                    await asyncio.sleep(60)  # Rate limiting
-            
-            # Clear processed PDFs from queue
-            pending_pdfs_queue.clear()
-        
-        await asyncio.sleep(300)  # Check every 5 minutes
-
 # API Routes
 @app.post("/upload-pdf")
 async def upload_pdf(
@@ -440,7 +348,7 @@ async def upload_pdf(
     description: str = Form(""),
     subject_category: str = Form("general")
 ):
-    """Upload PDF to processing queue with description"""
+    """Upload PDF - store info but don't process temporarily"""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
     
@@ -450,7 +358,7 @@ async def upload_pdf(
     # Check duplicate
     file_hash = hashlib.md5(file_content).hexdigest()
     
-    # Add to database
+    # Add to database only
     pdf_id = add_pdf_to_db(
         filename=file.filename,
         file_hash=file_hash,
@@ -467,23 +375,11 @@ async def upload_pdf(
             "pdf_id": None
         }
     
-    # Add to processing queue
-    if user_id not in pending_pdfs_queue:
-        pending_pdfs_queue[user_id] = []
-    
-    pending_pdfs_queue[user_id].append({
-        "pdf_id": pdf_id,
-        "filename": file.filename,
-        "file_content": file_content,
-        "user_id": user_id,
-        "uploaded_at": datetime.now().isoformat()
-    })
-    
     return {
-        "status": "queued",
-        "message": "PDF added to nightly processing queue",
-        "expected_ready": "Tomorrow 6 AM",
-        "pdf_id": pdf_id
+        "status": "success",
+        "message": "PDF stored successfully. Vector search will be available soon.",
+        "pdf_id": pdf_id,
+        "note": "PDF search temporarily disabled - coming soon"
     }
 
 @app.get("/user-pdfs/{user_id}")
@@ -495,14 +391,15 @@ async def get_user_pdfs_list(user_id: str):
         
         return {
             "pdfs": pdfs,
-            "stats": stats
+            "stats": stats,
+            "note": "PDF search temporarily disabled"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching PDFs: {str(e)}")
 
 @app.delete("/delete-pdf/{pdf_id}")
 async def delete_pdf(pdf_id: int, user_id: str):
-    """Delete a PDF and its vectors"""
+    """Delete a PDF from database"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -514,28 +411,23 @@ async def delete_pdf(pdf_id: int, user_id: str):
         if not pdf_info:
             raise HTTPException(status_code=404, detail="PDF not found")
         
-        # Delete from Pinecone (Serverless compatible)
-        vectors_to_delete = []
-        for i in range(1000):  # Assuming max 1000 chunks per PDF
-            vector_id = f"{user_id}_{pdf_id}_{i}"
-            vectors_to_delete.append(vector_id)
-        
-        if vectors_to_delete:
-            index.delete(ids=vectors_to_delete)
-        
-        # Delete from database
+        # Delete from database only (Pinecone temporarily disabled)
         cursor.execute('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
         conn.commit()
         conn.close()
         
-        return {"status": "success", "message": "PDF deleted successfully"}
+        return {
+            "status": "success", 
+            "message": "PDF deleted successfully",
+            "note": "Vector data cleanup will happen when search is enabled"
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting PDF: {str(e)}")
 
 @app.post("/ask-question")
 async def ask_question(request: QuestionRequest):
-    """Ask questions and get instant answers"""
+    """Ask questions and get instant answers (without PDF search temporarily)"""
     start_time = time.time()
     
     try:
@@ -550,40 +442,10 @@ async def ask_question(request: QuestionRequest):
         # Detect subject
         subject = detect_subject(request.question)
         
-        # Create question embedding
-        question_embedding = genai.embed_content(
-            model="models/embedding-001",
-            content=request.question
-        )['embedding']
-        
-        # Search in Pinecone (Serverless compatible)
-        results = index.query(
-            vector=question_embedding,
-            top_k=5,
-            include_metadata=True,
-            filter={"user_id": request.user_id}
-        )
-        
-        if not results['matches']:
-            return {
-                "answer": "I couldn't find relevant information in your PDFs to answer this question.",
-                "processing_time": f"{time.time() - start_time:.2f}s",
-                "subject": subject,
-                "language": answer_lang,
-                "sources_used": 0
-            }
-        
-        # Combine context
-        context_chunks = [match['metadata']['text'] for match in results['matches']]
-        context = "\n\n".join(context_chunks)
-        content_lang = detect_language(context)
-        
-        # Generate answer
+        # Direct Gemini se answer lo (without PDF context temporarily)
         prompt = create_smart_prompt(
             question=request.question,
-            context=context,
             question_lang=question_lang,
-            content_lang=content_lang,
             subject=subject,
             answer_lang=answer_lang
         )
@@ -608,7 +470,8 @@ async def ask_question(request: QuestionRequest):
             "processing_time": f"{time.time() - start_time:.2f}s",
             "subject": subject,
             "language": answer_lang,
-            "sources_used": len(results['matches'])
+            "sources_used": 0,
+            "note": "PDF search temporarily disabled - using general knowledge"
         }
         
     except Exception as e:
@@ -713,20 +576,67 @@ async def get_user_progress(user_id: str):
         "last_active": datetime.now().isoformat()
     })
 
+@app.get("/health")
+async def detailed_health_check():
+    """Detailed health check for monitoring"""
+    try:
+        # Check database
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        db_status = "healthy"
+        conn.close()
+    except Exception as e:
+        db_status = f"unhealthy: {str(e)}"
+    
+    try:
+        # Check Gemini
+        genai.list_models()
+        gemini_status = "healthy"
+    except Exception as e:
+        gemini_status = f"unhealthy: {str(e)}"
+    
+    return {
+        "status": "active",
+        "service": "Study AI Backend",
+        "timestamp": datetime.now().isoformat(),
+        "database": db_status,
+        "gemini_ai": gemini_status,
+        "pinecone": "temporarily_disabled",
+        "active_users": len(user_progress),
+        "version": "1.0",
+        "note": "PDF vector search coming soon"
+    }
+
 @app.get("/")
 async def health_check():
     """Health check endpoint"""
     return {
         "status": "active", 
         "service": "Study AI Backend",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "message": "Server is running successfully!",
+        "note": "PDF search temporarily disabled"
     }
 
-# Start background tasks
+# Startup event - background tasks temporarily disabled
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks on startup"""
-    asyncio.create_task(nightly_processor())
+    try:
+        print("🚀 Starting Study AI Backend...")
+        print("✅ Gemini AI configured")
+        print("ℹ️  Pinecone vector search temporarily disabled")
+        print("✅ Database initialized")
+        print("✅ All routes loaded successfully")
+        print("🔧 Server ready to handle requests")
+        
+        # Background tasks temporarily disabled
+        # asyncio.create_task(nightly_processor())
+        
+    except Exception as e:
+        print(f"💥 Startup error: {e}")
+        raise
 
 if __name__ == "__main__":
     import uvicorn
