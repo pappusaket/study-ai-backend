@@ -1,24 +1,2 @@
-# Pydantic V1 and FastAPI V1.x compatible setup
-
-# Core web framework (V1.x compatible)
-fastapi==0.95.2
+fastapi==0.104.1
 uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-
-# AI/ML packages
-google-generativeai==0.3.1
-pinecone-client==2.2.4
-
-# PDF processing
-pypdf==3.17.1
-
-# Utilities
-python-dotenv==1.0.1
-schedule==1.2.0
-aiofiles==23.2.1
-
-# Pydantic V1 (Pure Python - No Rust compilation)
-pydantic==1.10.13
-
-# HTTP client
-requests==2.32.3
