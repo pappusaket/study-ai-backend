@@ -1,10 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+import google.generativeai as genai
 import os
 
 # ✅ PEHLE APP CREATE KARO
-app = FastAPI(title="Study AI - Basic")
+app = FastAPI(title="Study AI - With Q&A")
 
 # CORS
 app.add_middleware(
@@ -15,7 +17,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ AB @app.get USE KARO
+# Configure Gemini
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# Pydantic Model for Q&A
+class QuestionRequest(BaseModel):
+    question: str
+    user_id: str = "default"
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
@@ -37,6 +48,7 @@ async def root():
                 border-radius: 15px; 
                 display: inline-block;
                 backdrop-filter: blur(10px);
+                max-width: 500px;
             }
             .status { 
                 font-size: 24px; 
@@ -67,6 +79,19 @@ async def root():
                 padding: 10px;
                 background: rgba(0,0,0,0.3);
                 border-radius: 5px;
+                transition: all 0.3s;
+            }
+            a:hover {
+                background: rgba(0,0,0,0.5);
+                transform: translateY(-2px);
+            }
+            .feature-badge {
+                background: #00ff00;
+                color: #333;
+                padding: 4px 8px;
+                border-radius: 12px;
+                font-size: 12px;
+                margin-left: 10px;
             }
         </style>
     </head>
@@ -76,12 +101,20 @@ async def root():
             <div class="status">
                 <span class="live-dot"></span> LIVE & RUNNING
             </div>
-            <p>Server is active and responding to requests</p>
+            <p>Smart Q&A System with AI-Powered Answers</p>
             
             <div class="endpoints">
                 <a href="/health">🔍 Health Check</a>
-                <a href="/docs">📚 API Documentation</a>
+                <a href="/docs">📚 API Documentation <span class="feature-badge">NEW</span></a>
                 <a href="/test">🧪 Test Endpoint</a>
+            </div>
+
+            <div style="margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.2); border-radius: 10px;">
+                <h3>🎯 Available Features</h3>
+                <p>✅ Smart Q&A System</p>
+                <p>✅ Multi-language Support</p>
+                <p>✅ Fast Response Time</p>
+                <p style="font-size: 12px; opacity: 0.8;">Use /ask endpoint for questions</p>
             </div>
             
             <div style="margin-top: 20px; font-size: 12px; opacity: 0.8;">
@@ -100,24 +133,66 @@ async def root():
     </html>
     """
 
-# Configure Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-
 @app.get("/health")
 async def health():
     gemini_status = "configured" if GEMINI_API_KEY else "not_configured"
     return {
         "status": "healthy", 
         "service": "Study AI",
-        "gemini": gemini_status
+        "gemini": gemini_status,
+        "features": ["Q&A System", "Multi-language", "Fast API"]
     }
 
 @app.get("/test")
 async def test():
     return {"test": "passed", "message": "Everything is working!"}
+
+@app.post("/ask")
+async def ask_question(request: QuestionRequest):
+    """Ask questions and get AI-powered answers"""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="Gemini API key not configured")
+    
+    try:
+        # Create prompt with context
+        prompt = f"""
+        You are a helpful study assistant. Answer the following question clearly and concisely.
+        
+        QUESTION: {request.question}
+        
+        Provide a comprehensive answer that would help a student understand the concept.
+        """
+        
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        
+        return {
+            "question": request.question,
+            "answer": response.text,
+            "status": "success",
+            "user_id": request.user_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+
+# New endpoint for quick testing
+@app.get("/ask-simple")
+async def ask_simple(question: str):
+    """Quick test endpoint for questions"""
+    if not GEMINI_API_KEY:
+        return {"error": "Gemini API key not configured"}
+    
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(question)
+        
+        return {
+            "question": question,
+            "answer": response.text,
+            "status": "success"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
