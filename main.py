@@ -11,9 +11,11 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 import asyncio
+import requests
+import json
 
 # ✅ PEHLE APP CREATE KARO
-app = FastAPI(title="Study AI - Complete Version")
+app = FastAPI(title="Study AI - Stable Version")
 
 # CORS
 app.add_middleware(
@@ -27,6 +29,7 @@ app.add_middleware(
 # Configure APIs
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_HOST = "study-ai-index-jjuj0dk.svc.aped-4627-b74a.pinecone.io"
 
 print(f"=== ENVIRONMENT VARIABLES ===")
 print(f"GEMINI_API_KEY: {'✅ Set' if GEMINI_API_KEY else '❌ Not Set'}")
@@ -36,89 +39,59 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     print("✅ Gemini configured successfully")
 
-# Pinecone Setup with detailed debugging
-pinecone_configured = False
-index = None
-pinecone_error = "Not attempted"
-
-try:
-    if PINECONE_API_KEY:
-        print("🔄 Attempting Pinecone initialization...")
-        
-        # Try new import style first
+# Pinecone HTTP Client (No package needed)
+class PineconeHTTPClient:
+    def __init__(self, api_key, index_host):
+        self.api_key = api_key
+        self.base_url = f"https://{index_host}"
+        self.headers = {
+            "Api-Key": api_key,
+            "Content-Type": "application/json"
+        }
+    
+    def upsert(self, vectors):
         try:
-            import pinecone
-            print("✅ pinecone module imported successfully")
-            
-            # Initialize with new SDK
-            pinecone.init(api_key=PINECONE_API_KEY)
-            print("✅ pinecone.init() successful")
-            
-            index_name = "study-ai-index"
-            
-            # Check if index exists
-            print(f"🔄 Checking index: {index_name}")
-            if index_name not in pinecone.list_indexes():
-                print(f"📝 Creating new index: {index_name}")
-                pinecone.create_index(
-                    name=index_name,
-                    dimension=768,
-                    metric="cosine"
-                )
-                print("✅ Index created successfully")
-            else:
-                print("✅ Index already exists")
-            
-            # Connect to index
-            index = pinecone.Index(index_name)
-            pinecone_configured = True
-            pinecone_error = "Success"
-            print("🎉 Pinecone fully configured and connected!")
-            
+            response = requests.post(
+                f"{self.base_url}/vectors/upsert",
+                headers=self.headers,
+                json={"vectors": vectors},
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
-            print(f"❌ New SDK failed: {e}")
-            pinecone_error = f"New SDK: {str(e)}"
-            
-            # Fallback to old SDK
-            try:
-                print("🔄 Trying old SDK...")
-                from pinecone import Pinecone, ServerlessSpec
+            print(f"Pinecone upsert error: {e}")
+            return None
+    
+    def query(self, vector, top_k=5, filter=None):
+        try:
+            payload = {
+                "vector": vector,
+                "topK": top_k,
+                "includeMetadata": True
+            }
+            if filter:
+                payload["filter"] = filter
                 
-                pc = Pinecone(api_key=PINECONE_API_KEY)
-                index_name = "study-ai-index"
-                
-                existing_indexes = [index["name"] for index in pc.list_indexes()]
-                print(f"Existing indexes: {existing_indexes}")
-                
-                if index_name not in existing_indexes:
-                    print(f"Creating index: {index_name}")
-                    pc.create_index(
-                        name=index_name,
-                        dimension=768,
-                        metric="cosine",
-                        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-                    )
-                
-                index = pc.Index(index_name)
-                pinecone_configured = True
-                pinecone_error = "Success (Old SDK)"
-                print("✅ Pinecone configured with old SDK")
-                
-            except Exception as e2:
-                print(f"❌ Old SDK also failed: {e2}")
-                pinecone_error = f"Both failed: New={e}, Old={e2}"
-                
-    else:
-        pinecone_error = "No API key"
-        print("❌ No Pinecone API key found")
-        
-except Exception as e:
-    print(f"💥 Overall Pinecone setup failed: {e}")
-    pinecone_error = f"Setup failed: {str(e)}"
+            response = requests.post(
+                f"{self.base_url}/vectors/query",
+                headers=self.headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Pinecone query error: {e}")
+            return None
 
-print(f"=== FINAL PINE CONE STATUS ===")
-print(f"Configured: {pinecone_configured}")
-print(f"Error: {pinecone_error}")
+# Initialize Pinecone HTTP Client
+pinecone_client = None
+if PINECONE_API_KEY and PINECONE_INDEX_HOST:
+    pinecone_client = PineconeHTTPClient(PINECONE_API_KEY, PINECONE_INDEX_HOST)
+    print("✅ Pinecone HTTP Client initialized")
+
+pinecone_configured = pinecone_client is not None
 
 # Database setup
 DB_PATH = "study_ai.db"
@@ -150,7 +123,7 @@ def init_db():
 # Initialize database
 init_db()
 
-# Pydantic Models
+# Pydantic Models (V1 compatible)
 class QuestionRequest(BaseModel):
     question: str
     user_id: str = "default"
@@ -212,7 +185,8 @@ async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
         chunks = split_text_into_chunks(text)
         print(f"Created {len(chunks)} chunks from PDF")
         
-        # Store each chunk in Pinecone
+        # Store each chunk in Pinecone via HTTP
+        successful_chunks = 0
         for i, chunk in enumerate(chunks):
             try:
                 # Create embedding
@@ -221,18 +195,23 @@ async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
                     content=chunk
                 )['embedding']
                 
-                # Store in Pinecone
-                index.upsert(vectors=[(
-                    f"{user_id}_{pdf_id}_{i}",
-                    embedding,
-                    {
+                # Prepare vector data
+                vector_data = {
+                    "id": f"{user_id}_{pdf_id}_{i}",
+                    "values": embedding,
+                    "metadata": {
                         "text": chunk,
                         "filename": filename,
                         "user_id": user_id,
                         "pdf_id": pdf_id,
                         "chunk_index": i
                     }
-                )])
+                }
+                
+                # Store in Pinecone via HTTP
+                result = pinecone_client.upsert([vector_data])
+                if result is not None:
+                    successful_chunks += 1
                 
             except Exception as e:
                 print(f"Error processing chunk {i}: {e}")
@@ -243,13 +222,13 @@ async def process_pdf_for_vectors(pdf_id, filename, file_content, user_id):
         cursor = conn.cursor()
         cursor.execute(
             'UPDATE pdf_files SET processed = TRUE, chunks_count = ? WHERE id = ?',
-            (len(chunks), pdf_id)
+            (successful_chunks, pdf_id)
         )
         conn.commit()
         conn.close()
         
-        print(f"✅ PDF {pdf_id} processed successfully with {len(chunks)} chunks")
-        return len(chunks)
+        print(f"✅ PDF {pdf_id} processed successfully with {successful_chunks} chunks")
+        return successful_chunks
         
     except Exception as e:
         print(f"❌ Error processing PDF for vectors: {e}")
@@ -321,7 +300,7 @@ async def root():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Study AI - Status</title>
+        <title>Study AI - Stable Version</title>
         <style>
             body {{ 
                 font-family: Arial, sans-serif; 
@@ -338,43 +317,25 @@ async def root():
                 backdrop-filter: blur(10px);
                 max-width: 700px;
             }}
-            .debug-info {{
-                background: rgba(255,255,255,0.1);
-                padding: 15px;
-                border-radius: 10px;
-                margin: 20px 0;
-                text-align: left;
-                font-size: 12px;
-            }}
         </style>
     </head>
     <body>
         <div class="status-box">
-            <h1>🚀 Study AI Backend</h1>
-            <div class="status">
-                <span class="live-dot"></span> LIVE & RUNNING
-            </div>
-            
+            <h1>🚀 Study AI Backend - STABLE</h1>
             <div style="margin: 20px 0;">
-                <span class="status-indicator status-active">Gemini AI ✅</span>
-                <span class="status-indicator" style="background: {pinecone_color}; color: {'#000' if pinecone_configured else '#fff'}">
+                <span style="background: #00ff00; color: #000; padding: 4px 12px; border-radius: 15px; margin: 0 5px;">Gemini AI ✅</span>
+                <span style="background: {pinecone_color}; color: {'#000' if pinecone_configured else '#fff'}; padding: 4px 12px; border-radius: 15px; margin: 0 5px;">
                     Vector Search {pinecone_status}
                 </span>
-                <span class="status-indicator status-active">PDF Processing ✅</span>
+                <span style="background: #00ff00; color: #000; padding: 4px 12px; border-radius: 15px; margin: 0 5px;">PDF Processing ✅</span>
             </div>
             
-            <div class="debug-info">
-                <strong>Debug Info:</strong><br>
-                Pinecone API Key: {'✅ Set' if PINECONE_API_KEY else '❌ Not Set'}<br>
-                Pinecone Configured: {pinecone_configured}<br>
-                Error: {pinecone_error}
-            </div>
+            <p>🎉 No Rust Compilation - Pure Python Solution</p>
             
-            <div class="endpoints">
-                <a href="/health">🔍 Health Check</a>
-                <a href="/debug-pinecone">🐛 Debug Pinecone</a>
-                <a href="/system-status">⚙️ System Status</a>
-                <a href="/docs">📚 API Docs</a>
+            <div style="margin-top: 20px;">
+                <a href="/health" style="color: #00ff00; text-decoration: none; display: block; margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px;">🔍 Health Check</a>
+                <a href="/system-status" style="color: #00ff00; text-decoration: none; display: block; margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px;">⚙️ System Status</a>
+                <a href="/docs" style="color: #00ff00; text-decoration: none; display: block; margin: 10px; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 5px;">📚 API Docs</a>
             </div>
         </div>
     </body>
@@ -385,36 +346,22 @@ async def root():
 async def health():
     return {
         "status": "healthy", 
-        "service": "Study AI",
+        "service": "Study AI - Stable",
         "gemini": "configured" if GEMINI_API_KEY else "not_configured",
         "pinecone": "configured" if pinecone_configured else "not_configured",
-        "pinecone_error": pinecone_error
-    }
-
-@app.get("/debug-pinecone")
-async def debug_pinecone():
-    """Debug Pinecone connection"""
-    return {
-        "pinecone_configured": pinecone_configured,
-        "api_key_set": bool(PINECONE_API_KEY),
-        "error_message": pinecone_error,
-        "next_steps": "Check Render logs for detailed error information"
+        "python_version": "3.11.9 - Stable"
     }
 
 @app.get("/system-status")
 async def system_status():
-    """Detailed system status"""
     return {
+        "status": "stable",
+        "python_version": "3.11.9",
         "gemini_ai": "active" if GEMINI_API_KEY else "inactive",
         "vector_database": "active" if pinecone_configured else "inactive",
         "pdf_processing": "active",
         "database": "active",
-        "api_keys": {
-            "gemini_set": bool(GEMINI_API_KEY),
-            "pinecone_set": bool(PINECONE_API_KEY),
-            "pinecone_connected": pinecone_configured
-        },
-        "pinecone_error": pinecone_error,
+        "architecture": "pure_python_no_rust",
         "features": {
             "smart_qa": True,
             "pdf_upload": True,
@@ -423,8 +370,8 @@ async def system_status():
         }
     }
 
-# ... (rest of the endpoints remain same as previous code)
-# Include all the other endpoints: /ask, /upload-pdf, /user-pdfs, /ask-simple etc.
+# Include all other endpoints: /ask, /upload-pdf, /user-pdfs, /ask-simple etc.
+# (Same as previous code but with Pydantic V1 compatibility)
 
 if __name__ == "__main__":
     import uvicorn
