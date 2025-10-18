@@ -1,21 +1,10 @@
-# Core web framework
-fastapi==0.95.2
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-
-# AI/ML packages
+fastapi==0.68.0
+uvicorn[standard]==0.15.0
+python-multipart==0.0.5
 google-generativeai==0.3.2
-
-# PDF processing
 pypdf==3.17.0
-
-# Utilities
 python-dotenv==1.0.1
 aiofiles==23.2.1
 requests==2.31.0
 
-# Pydantic V1 (Pure Python - No Rust)
-pydantic==1.10.13
-
-# Pinecone (try without first, then add)
-# pinecone-client==2.2.4
+# Pydantic included in FastAPI 0.68.0
