@@ -12,7 +12,7 @@ from datetime import datetime
 import requests
 import json
 
-app = FastAPI(title="Study AI - Pure Python")
+app = FastAPI(title="Study AI - Working Version")
 
 # CORS
 app.add_middleware(
@@ -26,7 +26,6 @@ app.add_middleware(
 # Configure APIs
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX_HOST = "study-ai-index-jjuj0dk.svc.aped-4627-b74a.pinecone.io"
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -112,19 +111,36 @@ def get_user_pdfs(user_id):
     conn.close()
     return pdfs
 
+def get_available_models():
+    """Get available Gemini models"""
+    try:
+        models = genai.list_models()
+        return [model.name for model in models]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
 @app.get("/")
 async def root():
     return """
     <html>
-    <head><title>Study AI</title></head>
-    <body style="font-family: Arial; text-align: center; padding: 50px;">
-        <h1>🚀 Study AI Backend</h1>
-        <p>✅ Pure Python - No Compilation Required</p>
-        <p>✅ Gemini AI Integrated</p>
-        <p>✅ PDF Processing</p>
-        <div style="margin-top: 20px;">
-            <a href="/health" style="display: block; margin: 10px;">Health Check</a>
-            <a href="/docs" style="display: block; margin: 10px;">API Docs</a>
+    <head>
+        <title>Study AI</title>
+        <style>
+            body { font-family: Arial; text-align: center; padding: 50px; background: #f0f0f0; }
+            .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Study AI Backend</h1>
+            <p>✅ Pure Python - No Compilation Required</p>
+            <p>✅ Gemini AI Integrated</p>
+            <p>✅ PDF Processing</p>
+            <div style="margin-top: 20px;">
+                <a href="/health" style="display: block; margin: 10px; padding: 10px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;">Health Check</a>
+                <a href="/docs" style="display: block; margin: 10px; padding: 10px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">API Docs</a>
+                <a href="/models" style="display: block; margin: 10px; padding: 10px; background: #6c757d; color: white; text-decoration: none; border-radius: 5px;">Available Models</a>
+            </div>
         </div>
     </body>
     </html>
@@ -134,11 +150,32 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Pure Python",
+        "service": "Study AI - Working Version",
         "gemini": "configured" if GEMINI_API_KEY else "not_configured",
-        "pinecone": "not_configured",
         "features": ["Q&A", "PDF Upload", "Database Storage"]
     }
+
+@app.get("/models")
+async def list_models():
+    """List available Gemini models"""
+    if not GEMINI_API_KEY:
+        return {"error": "Gemini API key not configured"}
+    
+    try:
+        models = genai.list_models()
+        available_models = []
+        for model in models:
+            supported_methods = model.supported_generation_methods
+            if 'generateContent' in supported_methods:
+                available_models.append({
+                    "name": model.name,
+                    "display_name": model.display_name,
+                    "description": model.description,
+                    "supported_methods": supported_methods
+                })
+        return {"available_models": available_models}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/ask")
 async def ask_question(request: QuestionRequest):
@@ -146,16 +183,33 @@ async def ask_question(request: QuestionRequest):
         raise HTTPException(status_code=500, detail="Gemini API key not configured")
     
     try:
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(request.question)
+        # Use the correct model name
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        response = model.generate_content(
+            f"You are a helpful study assistant. Answer this question clearly: {request.question}"
+        )
         
         return {
             "question": request.question,
             "answer": response.text,
+            "model_used": "gemini-1.5-flash",
             "status": "success"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        # Try alternative models if the first one fails
+        try:
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(request.question)
+            
+            return {
+                "question": request.question,
+                "answer": response.text,
+                "model_used": "gemini-pro",
+                "status": "success"
+            }
+        except Exception as e2:
+            raise HTTPException(status_code=500, detail=f"All models failed: {str(e2)}")
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), description: str = Form("")):
@@ -195,9 +249,22 @@ async def ask_simple(question: str):
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(question)
-        return {"question": question, "answer": response.text, "status": "success"}
+        # Try multiple model names
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(question)
+            model_used = "gemini-1.5-flash"
+        except:
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(question)
+            model_used = "gemini-pro"
+        
+        return {
+            "question": question, 
+            "answer": response.text, 
+            "status": "success",
+            "model_used": model_used
+        }
     except Exception as e:
         return {"error": str(e)}
 
