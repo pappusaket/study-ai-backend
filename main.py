@@ -10,13 +10,9 @@ import os
 import sqlite3
 from datetime import datetime
 from typing import Optional
-import requests
-import json
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
+import re
 
-app = FastAPI(title="Study AI - Smart PDF Q&A")
+app = FastAPI(title="Study AI - Simple PDF Q&A")
 
 # CORS
 app.add_middleware(
@@ -31,13 +27,6 @@ app.add_middleware(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-
-# Load sentence transformer model for semantic search
-try:
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    EMBEDDING_MODEL_LOADED = True
-except:
-    EMBEDDING_MODEL_LOADED = False
 
 # Database setup
 DB_PATH = "study_ai.db"
@@ -57,19 +46,7 @@ def init_db():
             status TEXT NOT NULL,
             file_size INTEGER,
             processed BOOLEAN DEFAULT FALSE,
-            text_content TEXT,
-            chunks_count INTEGER DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pdf_chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pdf_id INTEGER,
-            chunk_index INTEGER,
-            chunk_text TEXT,
-            embedding BLOB,
-            FOREIGN KEY (pdf_id) REFERENCES pdf_files (id)
+            text_content TEXT
         )
     ''')
     
@@ -92,7 +69,6 @@ class PDFInfo(BaseModel):
     status: str
     file_size: int
     processed: bool
-    chunks_count: int
 
 # Utility Functions
 def extract_text_from_pdf(pdf_content):
@@ -107,110 +83,73 @@ def extract_text_from_pdf(pdf_content):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
-def split_text_into_chunks(text, chunk_size=500, overlap=50):
-    """Split text into chunks for semantic search"""
-    if not text:
-        return []
-        
-    words = text.split()
-    chunks = []
+def find_relevant_text_simple(question, user_id):
+    """Simple keyword-based search for relevant text"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-        if i + chunk_size >= len(words):
-            break
+    # Get all processed PDFs for user
+    cursor.execute('''
+        SELECT text_content, filename 
+        FROM pdf_files 
+        WHERE user_id = ? AND processed = TRUE AND text_content IS NOT NULL
+    ''', (user_id,))
     
-    return chunks
-
-def get_text_embedding(text):
-    """Get embedding for text using sentence transformers"""
-    if not EMBEDDING_MODEL_LOADED:
-        return None
+    pdfs = cursor.fetchall()
+    conn.close()
     
-    try:
-        embedding = model.encode([text])[0]
-        return embedding.tobytes()  # Store as bytes in database
-    except:
-        return None
-
-def find_similar_chunks(question, user_id, top_k=3):
-    """Find most relevant PDF chunks for a question"""
-    if not EMBEDDING_MODEL_LOADED:
+    if not pdfs:
         return []
     
-    try:
-        # Get question embedding
-        question_embedding = model.encode([question])[0]
+    # Simple keyword matching
+    question_keywords = set(re.findall(r'\w+', question.lower()))
+    relevant_sections = []
+    
+    for text_content, filename in pdfs:
+        if not text_content:
+            continue
+            
+        # Split text into sentences
+        sentences = re.split(r'[.!?]+', text_content)
         
+        for sentence in sentences:
+            if len(sentence.strip()) < 10:  # Skip very short sentences
+                continue
+                
+            sentence_keywords = set(re.findall(r'\w+', sentence.lower()))
+            common_keywords = question_keywords.intersection(sentence_keywords)
+            
+            # If enough keywords match, consider it relevant
+            if len(common_keywords) >= 2:  # At least 2 common keywords
+                relevance_score = len(common_keywords) / len(question_keywords)
+                relevant_sections.append({
+                    'text': sentence.strip(),
+                    'filename': filename,
+                    'score': relevance_score
+                })
+    
+    # Sort by relevance and return top 3
+    relevant_sections.sort(key=lambda x: x['score'], reverse=True)
+    return relevant_sections[:3]
+
+def process_pdf_content(pdf_id, text_content):
+    """Store PDF text content"""
+    try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Get all chunks for user
-        cursor.execute('''
-            SELECT pc.chunk_text, pc.embedding, pf.filename
-            FROM pdf_chunks pc
-            JOIN pdf_files pf ON pc.pdf_id = pf.id
-            WHERE pf.user_id = ? AND pf.processed = TRUE
-        ''', (user_id,))
-        
-        chunks = cursor.fetchall()
-        conn.close()
-        
-        if not chunks:
-            return []
-        
-        # Calculate similarities
-        similarities = []
-        for chunk_text, embedding_bytes, filename in chunks:
-            if embedding_bytes:
-                chunk_embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
-                similarity = cosine_similarity([question_embedding], [chunk_embedding])[0][0]
-                similarities.append((chunk_text, similarity, filename))
-        
-        # Sort by similarity and return top matches
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:top_k]
-        
-    except Exception as e:
-        print(f"Error in semantic search: {e}")
-        return []
-
-def process_pdf_content(pdf_id, text_content, user_id):
-    """Process PDF text and store chunks with embeddings"""
-    if not EMBEDDING_MODEL_LOADED:
-        return 0
-    
-    try:
-        chunks = split_text_into_chunks(text_content)
-        
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Store chunks with embeddings
-        chunks_stored = 0
-        for i, chunk in enumerate(chunks):
-            embedding = get_text_embedding(chunk)
-            if embedding:
-                cursor.execute('''
-                    INSERT INTO pdf_chunks (pdf_id, chunk_index, chunk_text, embedding)
-                    VALUES (?, ?, ?, ?)
-                ''', (pdf_id, i, chunk, embedding))
-                chunks_stored += 1
-        
-        # Update PDF status
         cursor.execute(
-            'UPDATE pdf_files SET processed = TRUE, chunks_count = ?, text_content = ? WHERE id = ?',
-            (chunks_stored, text_content, pdf_id)
+            'UPDATE pdf_files SET processed = TRUE, text_content = ? WHERE id = ?',
+            (text_content, pdf_id)
         )
         
         conn.commit()
         conn.close()
-        return chunks_stored
+        return True
         
     except Exception as e:
-        print(f"Error processing PDF content: {e}")
-        return 0
+        print(f"Error storing PDF content: {e}")
+        return False
 
 def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
     conn = sqlite3.connect(DB_PATH)
@@ -235,7 +174,7 @@ def get_user_pdfs(user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, filename, description, upload_date, status, file_size, processed, chunks_count
+        SELECT id, filename, description, upload_date, status, file_size, processed
         FROM pdf_files 
         WHERE user_id = ? 
         ORDER BY upload_date DESC
@@ -246,23 +185,22 @@ def get_user_pdfs(user_id):
         pdfs.append({
             "id": row[0], "filename": row[1], "description": row[2],
             "upload_date": row[3], "status": row[4], "file_size": row[5],
-            "processed": bool(row[6]), "chunks_count": row[7] or 0
+            "processed": bool(row[6])
         })
     conn.close()
     return pdfs
 
 @app.get("/")
 async def root():
-    return {"status": "active", "service": "Study AI - Smart PDF Q&A"}
+    return {"status": "active", "service": "Study AI - Simple PDF Q&A"}
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Smart PDF Q&A",
+        "service": "Study AI - Simple PDF Q&A",
         "gemini": "configured" if GEMINI_API_KEY else "not_configured",
-        "semantic_search": "available" if EMBEDDING_MODEL_LOADED else "unavailable",
-        "features": ["Smart Q&A", "PDF Context Processing", "Semantic Search"]
+        "features": ["Smart Q&A", "PDF Context Processing", "Keyword Search"]
     }
 
 @app.post("/ask")
@@ -275,16 +213,16 @@ async def ask_question(request: QuestionRequest):
         sources_used = 0
         
         # If PDF context is enabled, find relevant content
-        if request.use_pdf_context and EMBEDDING_MODEL_LOADED:
-            similar_chunks = find_similar_chunks(request.question, request.user_id)
+        if request.use_pdf_context:
+            relevant_sections = find_relevant_text_simple(request.question, request.user_id)
             
-            if similar_chunks:
+            if relevant_sections:
                 context_chunks = []
-                for chunk_text, similarity, filename in similar_chunks:
-                    context_chunks.append(f"From {filename} (relevance: {similarity:.2f}): {chunk_text}")
+                for section in relevant_sections:
+                    context_chunks.append(f"From {section['filename']}: {section['text']}")
                 
                 context = "\n\nRelevant information from your PDFs:\n" + "\n---\n".join(context_chunks)
-                sources_used = len(similar_chunks)
+                sources_used = len(relevant_sections)
         
         # Create smart prompt with context
         if context:
@@ -323,7 +261,7 @@ async def ask_question(request: QuestionRequest):
             "status": "success",
             "context_used": sources_used > 0,
             "sources_used": sources_used,
-            "semantic_search": EMBEDDING_MODEL_LOADED
+            "search_method": "keyword_based"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -346,10 +284,10 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), des
     text_content = extract_text_from_pdf(file_content)
     word_count = len(text_content.split()) if text_content else 0
     
-    # Process PDF for semantic search (in background)
-    chunks_processed = 0
-    if EMBEDDING_MODEL_LOADED and text_content:
-        chunks_processed = process_pdf_content(pdf_id, text_content, user_id)
+    # Store PDF content for context search
+    processed = False
+    if text_content:
+        processed = process_pdf_content(pdf_id, text_content)
     
     return {
         "status": "success",
@@ -358,9 +296,8 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), des
         "filename": file.filename,
         "word_count": word_count,
         "description": description,
-        "processed": chunks_processed > 0,
-        "chunks_processed": chunks_processed,
-        "semantic_search_available": EMBEDDING_MODEL_LOADED
+        "processed": processed,
+        "context_search_available": True
     }
 
 @app.get("/user-pdfs/{user_id}")
@@ -371,8 +308,7 @@ async def get_user_pdfs_list(user_id: str):
             "user_id": user_id,
             "pdfs": pdfs,
             "total_pdfs": len(pdfs),
-            "processed_pdfs": sum(1 for p in pdfs if p['processed']),
-            "semantic_search": EMBEDDING_MODEL_LOADED
+            "processed_pdfs": sum(1 for p in pdfs if p['processed'])
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
@@ -386,6 +322,30 @@ async def ask_simple(question: str, user_id: str = "default", use_context: bool 
         return await ask_question(request)
     except Exception as e:
         return {"error": str(e)}
+
+@app.delete("/delete-pdf/{pdf_id}")
+async def delete_pdf(pdf_id: int, user_id: str):
+    """Delete a PDF and its content"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if PDF exists and belongs to user
+        cursor.execute('SELECT id FROM pdf_files WHERE id = ? AND user_id = ?', (pdf_id, user_id))
+        pdf_info = cursor.fetchone()
+        
+        if not pdf_info:
+            raise HTTPException(status_code=404, detail="PDF not found")
+        
+        # Delete from database
+        cursor.execute('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"status": "success", "message": "PDF deleted successfully"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting PDF: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
