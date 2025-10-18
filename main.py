@@ -12,7 +12,7 @@ from datetime import datetime
 import requests
 import json
 
-app = FastAPI(title="Study AI - Working Version")
+app = FastAPI(title="Study AI - Latest Models")
 
 # CORS
 app.add_middleware(
@@ -111,14 +111,6 @@ def get_user_pdfs(user_id):
     conn.close()
     return pdfs
 
-def get_available_models():
-    """Get available Gemini models"""
-    try:
-        models = genai.list_models()
-        return [model.name for model in models]
-    except Exception as e:
-        return [f"Error: {str(e)}"]
-
 @app.get("/")
 async def root():
     return """
@@ -133,13 +125,12 @@ async def root():
     <body>
         <div class="container">
             <h1>🚀 Study AI Backend</h1>
-            <p>✅ Pure Python - No Compilation Required</p>
-            <p>✅ Gemini AI Integrated</p>
+            <p>✅ Latest Gemini Models</p>
             <p>✅ PDF Processing</p>
+            <p>✅ Database Storage</p>
             <div style="margin-top: 20px;">
                 <a href="/health" style="display: block; margin: 10px; padding: 10px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;">Health Check</a>
-                <a href="/docs" style="display: block; margin: 10px; padding: 10px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">API Docs</a>
-                <a href="/models" style="display: block; margin: 10px; padding: 10px; background: #6c757d; color: white; text-decoration: none; border-radius: 5px;">Available Models</a>
+                <a href="/ask-simple?question=What is AI?" style="display: block; margin: 10px; padding: 10px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">Test Q&A</a>
             </div>
         </div>
     </body>
@@ -150,32 +141,10 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Working Version",
+        "service": "Study AI - Latest Models",
         "gemini": "configured" if GEMINI_API_KEY else "not_configured",
         "features": ["Q&A", "PDF Upload", "Database Storage"]
     }
-
-@app.get("/models")
-async def list_models():
-    """List available Gemini models"""
-    if not GEMINI_API_KEY:
-        return {"error": "Gemini API key not configured"}
-    
-    try:
-        models = genai.list_models()
-        available_models = []
-        for model in models:
-            supported_methods = model.supported_generation_methods
-            if 'generateContent' in supported_methods:
-                available_models.append({
-                    "name": model.name,
-                    "display_name": model.display_name,
-                    "description": model.description,
-                    "supported_methods": supported_methods
-                })
-        return {"available_models": available_models}
-    except Exception as e:
-        return {"error": str(e)}
 
 @app.post("/ask")
 async def ask_question(request: QuestionRequest):
@@ -183,29 +152,29 @@ async def ask_question(request: QuestionRequest):
         raise HTTPException(status_code=500, detail="Gemini API key not configured")
     
     try:
-        # Use the correct model name
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Use the latest stable models
+        model = genai.GenerativeModel('gemini-2.0-flash-001')
         
         response = model.generate_content(
-            f"You are a helpful study assistant. Answer this question clearly: {request.question}"
+            f"You are a helpful study assistant. Answer this question clearly and concisely: {request.question}"
         )
         
         return {
             "question": request.question,
             "answer": response.text,
-            "model_used": "gemini-1.5-flash",
+            "model_used": "gemini-2.0-flash-001",
             "status": "success"
         }
     except Exception as e:
         # Try alternative models if the first one fails
         try:
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content(request.question)
             
             return {
                 "question": request.question,
                 "answer": response.text,
-                "model_used": "gemini-pro",
+                "model_used": "gemini-2.5-flash",
                 "status": "success"
             }
         except Exception as e2:
@@ -249,15 +218,20 @@ async def ask_simple(question: str):
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
-        # Try multiple model names
+        # Try multiple latest models
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.0-flash-001')
             response = model.generate_content(question)
-            model_used = "gemini-1.5-flash"
+            model_used = "gemini-2.0-flash-001"
         except:
-            model = genai.GenerativeModel('gemini-pro')
-            response = model.generate_content(question)
-            model_used = "gemini-pro"
+            try:
+                model = genai.GenerativeModel('gemini-2.5-flash')
+                response = model.generate_content(question)
+                model_used = "gemini-2.5-flash"
+            except:
+                model = genai.GenerativeModel('gemini-2.0-flash-lite-001')
+                response = model.generate_content(question)
+                model_used = "gemini-2.0-flash-lite-001"
         
         return {
             "question": question, 
@@ -265,6 +239,28 @@ async def ask_simple(question: str):
             "status": "success",
             "model_used": model_used
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/models")
+async def list_models():
+    """List available Gemini models"""
+    if not GEMINI_API_KEY:
+        return {"error": "Gemini API key not configured"}
+    
+    try:
+        models = genai.list_models()
+        available_models = []
+        for model in models:
+            supported_methods = model.supported_generation_methods
+            if 'generateContent' in supported_methods:
+                available_models.append({
+                    "name": model.name,
+                    "display_name": model.display_name,
+                    "description": model.description,
+                    "supported_methods": supported_methods
+                })
+        return {"available_models": available_models}
     except Exception as e:
         return {"error": str(e)}
 
