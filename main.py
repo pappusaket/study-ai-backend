@@ -14,22 +14,24 @@ import re
 
 app = FastAPI(title="Study AI - Simple PDF Q&A")
 
-# CORS
+# CORS - Render के लिए updated
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Production में specific domains add करें
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure APIs
+# Configure APIs - Render environment variables के लिए
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable not set")
 
-# Database setup
-DB_PATH = "study_ai.db"
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Database setup - Render persistent storage के लिए
+DB_PATH = os.path.join(os.getcwd(), "study_ai.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -50,6 +52,23 @@ def init_db():
         )
     ''')
     
+    # New table for text files from WordPress media
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS text_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wordpress_file_id INTEGER,
+            filename TEXT NOT NULL,
+            file_hash TEXT UNIQUE NOT NULL,
+            user_id TEXT NOT NULL,
+            description TEXT,
+            upload_date TEXT NOT NULL,
+            file_size INTEGER,
+            processed BOOLEAN DEFAULT TRUE,
+            text_content TEXT,
+            file_type TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -60,6 +79,13 @@ class QuestionRequest(BaseModel):
     question: str
     user_id: str = "default"
     use_pdf_context: bool = True
+
+class TextFileRequest(BaseModel):
+    file_id: int
+    filename: str
+    content: str
+    user_id: str
+    file_type: str = "text"
 
 class PDFInfo(BaseModel):
     id: int
@@ -84,7 +110,7 @@ def extract_text_from_pdf(pdf_content):
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
 def find_relevant_text_simple(question, user_id):
-    """Simple keyword-based search for relevant text"""
+    """Simple keyword-based search for relevant text from both PDFs and text files"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -96,16 +122,28 @@ def find_relevant_text_simple(question, user_id):
     ''', (user_id,))
     
     pdfs = cursor.fetchall()
+    
+    # Get all text files for user
+    cursor.execute('''
+        SELECT text_content, filename 
+        FROM text_files 
+        WHERE user_id = ? AND processed = TRUE AND text_content IS NOT NULL
+    ''', (user_id,))
+    
+    text_files = cursor.fetchall()
+    
     conn.close()
     
-    if not pdfs:
+    all_files = pdfs + text_files
+    
+    if not all_files:
         return []
     
     # Simple keyword matching
     question_keywords = set(re.findall(r'\w+', question.lower()))
     relevant_sections = []
     
-    for text_content, filename in pdfs:
+    for text_content, filename in all_files:
         if not text_content:
             continue
             
@@ -190,17 +228,88 @@ def get_user_pdfs(user_id):
     conn.close()
     return pdfs
 
+# New functions for text file processing
+def process_text_file_content(file_data: TextFileRequest):
+    """Process and store text file content from WordPress"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        file_hash = hashlib.md5(file_data.content.encode()).hexdigest()
+        
+        # Check if already exists
+        cursor.execute('SELECT id FROM text_files WHERE file_hash = ? AND user_id = ?', 
+                      (file_hash, file_data.user_id))
+        existing = cursor.fetchone()
+        
+        if existing:
+            conn.close()
+            return {"status": "duplicate", "file_id": existing[0]}
+        
+        # Insert new text file
+        cursor.execute('''
+            INSERT INTO text_files 
+            (wordpress_file_id, filename, file_hash, user_id, description, upload_date, file_size, text_content, file_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            file_data.file_id,
+            file_data.filename,
+            file_hash,
+            file_data.user_id,
+            f"Text file from WordPress: {file_data.filename}",
+            datetime.now().isoformat(),
+            len(file_data.content),
+            file_data.content,
+            file_data.file_type
+        ))
+        
+        conn.commit()
+        file_id = cursor.lastrowid
+        conn.close()
+        
+        return {"status": "success", "file_id": file_id}
+        
+    except Exception as e:
+        print(f"Error processing text file: {e}")
+        return {"status": "error", "message": str(e)}
+
+def get_user_text_files(user_id):
+    """Get all text files for a user"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, filename, description, upload_date, file_size, file_type
+        FROM text_files 
+        WHERE user_id = ? 
+        ORDER BY upload_date DESC
+    ''', (user_id,))
+    
+    files = []
+    for row in cursor.fetchall():
+        files.append({
+            "id": row[0], "filename": row[1], "description": row[2],
+            "upload_date": row[3], "file_size": row[4], "file_type": row[5]
+        })
+    conn.close()
+    return files
+
 @app.get("/")
 async def root():
-    return {"status": "active", "service": "Study AI - Simple PDF Q&A"}
+    return {
+        "status": "active", 
+        "service": "Study AI - PDF & Text File Q&A",
+        "version": "2.0",
+        "features": ["PDF Processing", "Text File Support", "WordPress Integration"]
+    }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Simple PDF Q&A",
+        "service": "Study AI - PDF & Text File Q&A",
         "gemini": "configured" if GEMINI_API_KEY else "not_configured",
-        "features": ["Smart Q&A", "PDF Context Processing", "Keyword Search"]
+        "database": "connected",
+        "features": ["Smart Q&A", "PDF Context", "Text File Support", "Keyword Search"]
     }
 
 @app.post("/ask")
@@ -212,7 +321,7 @@ async def ask_question(request: QuestionRequest):
         context = ""
         sources_used = 0
         
-        # If PDF context is enabled, find relevant content
+        # If context is enabled, find relevant content
         if request.use_pdf_context:
             relevant_sections = find_relevant_text_simple(request.question, request.user_id)
             
@@ -221,13 +330,13 @@ async def ask_question(request: QuestionRequest):
                 for section in relevant_sections:
                     context_chunks.append(f"From {section['filename']}: {section['text']}")
                 
-                context = "\n\nRelevant information from your PDFs:\n" + "\n---\n".join(context_chunks)
+                context = "\n\nRelevant information from your files:\n" + "\n---\n".join(context_chunks)
                 sources_used = len(relevant_sections)
         
         # Create smart prompt with context
         if context:
             prompt = f"""
-            You are a helpful study assistant. Use the provided context from the user's PDF documents to answer their question accurately.
+            You are a helpful study assistant. Use the provided context from the user's files to answer their question accurately.
 
             QUESTION: {request.question}
 
@@ -266,6 +375,48 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
+# Text File Processing Endpoints
+@app.post("/process-text-file")
+async def process_text_file(request: TextFileRequest):
+    """Process text files from WordPress media library"""
+    try:
+        result = process_text_file_content(request)
+        
+        if result["status"] == "duplicate":
+            return {
+                "status": "duplicate", 
+                "message": "File already processed",
+                "file_id": result["file_id"]
+            }
+        elif result["status"] == "success":
+            return {
+                "status": "success",
+                "message": "Text file processed successfully",
+                "file_id": result["file_id"],
+                "filename": request.filename,
+                "word_count": len(request.content.split()),
+                "file_type": request.file_type
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["message"])
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing text file: {str(e)}")
+
+@app.get("/user-text-files/{user_id}")
+async def get_user_text_files_list(user_id: str):
+    """Get all text files for a user"""
+    try:
+        files = get_user_text_files(user_id)
+        return {
+            "user_id": user_id,
+            "files": files,
+            "total_files": len(files)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# Existing PDF endpoints (unchanged)
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), description: str = Form("")):
     if not file.filename.endswith('.pdf'):
@@ -315,6 +466,7 @@ async def get_user_pdfs_list(user_id: str):
 
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True):
+    """Simple GET endpoint for WordPress plugin"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
@@ -347,6 +499,32 @@ async def delete_pdf(pdf_id: int, user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting PDF: {str(e)}")
 
+@app.delete("/delete-text-file/{file_id}")
+async def delete_text_file(file_id: int, user_id: str):
+    """Delete a text file and its content"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if file exists and belongs to user
+        cursor.execute('SELECT id FROM text_files WHERE id = ? AND user_id = ?', (file_id, user_id))
+        file_info = cursor.fetchone()
+        
+        if not file_info:
+            raise HTTPException(status_code=404, detail="Text file not found")
+        
+        # Delete from database
+        cursor.execute('DELETE FROM text_files WHERE id = ?', (file_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"status": "success", "message": "Text file deleted successfully"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting text file: {str(e)}")
+
+# Render deployment के लिए important
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
