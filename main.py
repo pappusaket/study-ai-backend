@@ -28,7 +28,7 @@ except ImportError as e:
     TTS_AVAILABLE = False
     TTS_PROVIDER = "none"
 
-app = FastAPI(title="Study AI - Hindi+English Answers")
+app = FastAPI(title="Study AI - Smart Mixed Language TTS")
 
 # CORS
 app.add_middleware(
@@ -116,7 +116,145 @@ class PDFInfo(BaseModel):
     file_size: int
     processed: bool
 
-# Utility Functions
+# Smart Language Processing Functions
+def detect_language_segment(text):
+    """Detect if text segment is Hindi, English, or Mixed"""
+    hindi_chars = len(re.findall(r'[अ-ह]', text))
+    english_chars = len(re.findall(r'[a-zA-Z]', text))
+    total_chars = len(re.sub(r'[^\w]', '', text))
+    
+    if total_chars == 0:
+        return "unknown"
+    
+    hindi_ratio = hindi_chars / total_chars
+    english_ratio = english_chars / total_chars
+    
+    if hindi_ratio > 0.7:
+        return "hindi"
+    elif english_ratio > 0.7:
+        return "english"
+    else:
+        return "mixed"
+
+def split_mixed_text(text):
+    """Split mixed text into language segments"""
+    # Pattern to match Hindi text with English in brackets
+    pattern = r'([अ-ह][^()]*?)\s*\(([^)]+)\)'
+    
+    segments = []
+    last_end = 0
+    
+    for match in re.finditer(pattern, text):
+        # Text before the match
+        if match.start() > last_end:
+            before_text = text[last_end:match.start()].strip()
+            if before_text:
+                segments.append(("hindi", before_text))
+        
+        # Hindi part
+        hindi_text = match.group(1).strip()
+        if hindi_text:
+            segments.append(("hindi", hindi_text))
+        
+        # English part in brackets
+        english_text = match.group(2).strip()
+        if english_text:
+            segments.append(("english", english_text))
+        
+        last_end = match.end()
+    
+    # Remaining text
+    if last_end < len(text):
+        remaining_text = text[last_end:].strip()
+        if remaining_text:
+            lang = detect_language_segment(remaining_text)
+            segments.append((lang, remaining_text))
+    
+    # If no mixed patterns found, split by sentences
+    if not segments:
+        sentences = re.split(r'[.!?]+', text)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if sentence:
+                lang = detect_language_segment(sentence)
+                segments.append((lang, sentence))
+    
+    return segments
+
+def clean_text_for_tts(text):
+    """Clean text for TTS by removing HTML tags and special formatting"""
+    # Remove HTML tags
+    clean_text = re.sub(r'<[^>]*>', '', text)
+    # Remove extra spaces and newlines
+    clean_text = re.sub(r'\s+', ' ', clean_text)
+    # Remove special characters but keep Hindi and English text
+    clean_text = re.sub(r'[^\w\sअ-ह\.\,\?\!]', '', clean_text)
+    return clean_text.strip()
+
+def create_smart_tts_audio_base64(text, language="auto"):
+    """Create TTS audio with smart language detection for mixed text"""
+    if not TTS_AVAILABLE:
+        return None, "TTS not available"
+    
+    try:
+        # Clean the text first
+        clean_text = clean_text_for_tts(text)
+        
+        if len(clean_text) > 3000:
+            clean_text = clean_text[:3000] + "..."
+        
+        # Split text into language segments
+        segments = split_mixed_text(clean_text)
+        
+        if not segments:
+            return None, "No text segments found"
+        
+        # If only one segment, use simple TTS
+        if len(segments) == 1:
+            lang, segment_text = segments[0]
+            if lang == "unknown":
+                lang = "hi"  # Default to Hindi for unknown
+            tts = gTTS(text=segment_text, lang=lang, slow=False)
+            audio_buffer = io.BytesIO()
+            tts.write_to_fp(audio_buffer)
+            audio_buffer.seek(0)
+            audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
+            return audio_base64, None
+        
+        # For multiple segments, create separate audio clips and merge
+        audio_buffers = []
+        
+        for lang, segment_text in segments:
+            if not segment_text.strip():
+                continue
+                
+            # Determine TTS language
+            if lang == "hindi":
+                tts_lang = "hi"
+            elif lang == "english":
+                tts_lang = "en"
+            else:
+                tts_lang = "hi"  # Default to Hindi for mixed/unknown
+            
+            # Create TTS for this segment
+            tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
+            segment_buffer = io.BytesIO()
+            tts.write_to_fp(segment_buffer)
+            segment_buffer.seek(0)
+            audio_buffers.append(segment_buffer.getvalue())
+        
+        # Combine all audio segments
+        if audio_buffers:
+            combined_audio = b''.join(audio_buffers)
+            audio_base64 = base64.b64encode(combined_audio).decode('utf-8')
+            return audio_base64, None
+        else:
+            return None, "No audio generated"
+            
+    except Exception as e:
+        return None, f"Smart TTS conversion failed: {str(e)}"
+
+# Rest of the utility functions (same as before)
 def extract_text_from_pdf(pdf_content):
     try:
         pdf_reader = PdfReader(io.BytesIO(pdf_content))
@@ -130,7 +268,6 @@ def extract_text_from_pdf(pdf_content):
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
 def find_relevant_text_simple(question, user_id):
-    """Simple keyword-based search for relevant text"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -185,7 +322,6 @@ def find_relevant_text_simple(question, user_id):
     return relevant_sections[:3]
 
 def process_pdf_content(pdf_id, text_content):
-    """Store PDF text content"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -243,7 +379,6 @@ def get_user_pdfs(user_id):
     return pdfs
 
 def process_text_file_content(file_data: TextFileRequest):
-    """Process and store text file content from WordPress"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -285,7 +420,6 @@ def process_text_file_content(file_data: TextFileRequest):
         return {"status": "error", "message": str(e)}
 
 def get_user_text_files(user_id):
-    """Get all text files for a user"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -305,19 +439,12 @@ def get_user_text_files(user_id):
     return files
 
 def detect_language(question):
-    """Detect if question is in Hindi, English, or mixed"""
     hindi_pattern = re.compile(r'[अ-ह]')
-    
     has_hindi = bool(hindi_pattern.search(question))
-    
-    if has_hindi:
-        return "hindi"
-    else:
-        return "english"
+    return "hindi" if has_hindi else "english"
 
 def format_structured_answer(answer_text, is_hindi=False):
-    """Convert AI response into structured HTML format with blue headings and TTS button"""
-    
+    # ... (same format_structured_answer function as before)
     # Clean the response
     answer_text = answer_text.strip()
     
@@ -359,22 +486,14 @@ def format_structured_answer(answer_text, is_hindi=False):
         sections = [{"heading": "उत्तर" if is_hindi else "Answer", "content": answer_text}]
     
     # Generate HTML with blue headings and TTS button
-    tts_button = ''
-    if TTS_AVAILABLE:
-        tts_button = '''
-        <div style="margin: 15px 0; text-align: center;">
-            <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
-                🔊 सुनें / Listen
-            </button>
-            <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
-        </div>
-        '''
-    else:
-        tts_button = '''
-        <div style="margin: 15px 0; text-align: center; color: #666; font-size: 12px;">
-            🔊 TTS Feature Currently Unavailable
-        </div>
-        '''
+    tts_button = '''
+    <div style="margin: 15px 0; text-align: center;">
+        <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
+            🔊 सुनें / Listen
+        </button>
+        <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
+    </div>
+    '''
     
     html_output = tts_button
     
@@ -414,121 +533,73 @@ def format_structured_answer(answer_text, is_hindi=False):
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
     
     # Add JavaScript for TTS functionality
-    if TTS_AVAILABLE:
-        html_output += '''
-        <script>
-        function speakAnswer() {
-            const answerDiv = document.getElementById('pappu-ai-answer');
-            const statusSpan = document.getElementById('tts-status');
-            const answerText = answerDiv.innerText || answerDiv.textContent;
-            
-            statusSpan.textContent = 'Loading...';
-            
-            // Remove the TTS button text from the speech content
-            const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
-            
-            fetch('https://study-ai-backend-fylo.onrender.com/text-to-speech', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    text: speechText,
-                    language: 'auto'
-                })
+    html_output += '''
+    <script>
+    function speakAnswer() {
+        const answerDiv = document.getElementById('pappu-ai-answer');
+        const statusSpan = document.getElementById('tts-status');
+        const answerText = answerDiv.innerText || answerDiv.textContent;
+        
+        statusSpan.textContent = 'Loading...';
+        
+        // Remove the TTS button text from the speech content
+        const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
+        
+        fetch('https://study-ai-backend-fylo.onrender.com/text-to-speech', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                text: speechText,
+                language: 'auto'
             })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.audio_base64) {
-                    statusSpan.textContent = 'Playing...';
-                    
-                    // Create audio from base64
-                    const audio = new Audio('data:audio/mp3;base64,' + data.audio_base64);
-                    audio.play();
-                    
-                    audio.onended = function() {
-                        statusSpan.textContent = 'Completed';
-                        setTimeout(() => {
-                            statusSpan.textContent = '';
-                        }, 2000);
-                    };
-                    
-                    audio.onerror = function() {
-                        statusSpan.textContent = 'Audio error';
-                    };
-                } else {
-                    statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
-                }
-            })
-            .catch(error => {
-                console.error('TTS Error:', error);
-                statusSpan.textContent = 'Error: ' + error.message;
-            });
-        }
-        </script>
-        '''
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.audio_base64) {
+                statusSpan.textContent = 'Playing...';
+                
+                // Create audio from base64
+                const audio = new Audio('data:audio/mp3;base64,' + data.audio_base64);
+                audio.play();
+                
+                audio.onended = function() {
+                    statusSpan.textContent = 'Completed';
+                    setTimeout(() => {
+                        statusSpan.textContent = '';
+                    }, 2000);
+                };
+                
+                audio.onerror = function() {
+                    statusSpan.textContent = 'Audio error';
+                };
+            } else {
+                statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
+            }
+        })
+        .catch(error => {
+            console.error('TTS Error:', error);
+            statusSpan.textContent = 'Error: ' + error.message;
+        });
+    }
+    </script>
+    '''
     
     return html_output
-
-def clean_text_for_tts(text):
-    """Clean text for TTS by removing HTML tags and special formatting"""
-    # Remove HTML tags
-    clean_text = re.sub(r'<[^>]*>', '', text)
-    # Remove extra spaces and newlines
-    clean_text = re.sub(r'\s+', ' ', clean_text)
-    # Remove special characters but keep Hindi and English text
-    clean_text = re.sub(r'[^\w\sअ-ह\.\,\?\!]', '', clean_text)
-    return clean_text.strip()
-
-def create_tts_audio_base64(text, language="auto"):
-    """Create TTS audio and return as base64 string"""
-    if not TTS_AVAILABLE:
-        return None, "TTS not available"
-    
-    try:
-        # Clean the text
-        clean_text = clean_text_for_tts(text)
-        
-        if len(clean_text) > 4000:
-            clean_text = clean_text[:4000] + "..."
-        
-        # Determine language
-        if language == "auto":
-            has_hindi = re.search(r'[अ-ह]', clean_text)
-            tts_language = "hi" if has_hindi else "en"
-        else:
-            tts_language = language
-        
-        if TTS_PROVIDER == "gtts":
-            # Use gTTS and get audio as bytes
-            tts = gTTS(text=clean_text, lang=tts_language, slow=False)
-            
-            # Save to bytes buffer instead of file
-            audio_buffer = io.BytesIO()
-            tts.write_to_fp(audio_buffer)
-            audio_buffer.seek(0)
-            
-            # Convert to base64
-            audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
-            return audio_base64, None
-        else:
-            return None, "No TTS provider available"
-            
-    except Exception as e:
-        return None, f"TTS conversion failed: {str(e)}"
 
 @app.get("/")
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - Hindi+English Answers",
-        "version": "2.8",
-        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Structured Format"],
+        "service": "Study AI - Smart Mixed Language TTS",
+        "version": "2.9",
+        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Smart Mixed Language TTS"],
         "tts_available": TTS_AVAILABLE,
         "tts_provider": TTS_PROVIDER
     }
@@ -537,13 +608,14 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Hindi+English Answers",
+        "service": "Study AI - Smart Mixed Language TTS",
         "gemini": "configured",
         "database": "connected",
         "tts": TTS_PROVIDER,
         "tts_available": TTS_AVAILABLE,
-        "languages": ["auto", "hindi", "english"],
-        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Blue Headings"]
+        "smart_tts": True,
+        "languages": ["auto", "hindi", "english", "mixed"],
+        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Smart Mixed Language TTS"]
     }
 
 @app.post("/ask")
@@ -639,21 +711,22 @@ async def ask_question(request: QuestionRequest):
             "format": "structured_html",
             "detected_language": detected_language,
             "language_used": "hindi" if detected_language == "hindi" else "english",
-            "tts_available": TTS_AVAILABLE
+            "tts_available": TTS_AVAILABLE,
+            "smart_tts": True
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
-# TTS Endpoint - Now returns base64 audio directly
+# TTS Endpoint - Now with smart mixed language processing
 @app.post("/text-to-speech")
 async def text_to_speech(request: TTSRequest):
-    """Convert text to speech and return base64 audio"""
+    """Convert text to speech with smart mixed language detection"""
     try:
         if not request.text or len(request.text.strip()) == 0:
             return {"error": "No text provided"}
         
-        # Create TTS audio as base64
-        audio_base64, error = create_tts_audio_base64(request.text, request.language)
+        # Create smart TTS audio as base64
+        audio_base64, error = create_smart_tts_audio_base64(request.text, request.language)
         
         if error:
             return {"error": error}
@@ -663,14 +736,16 @@ async def text_to_speech(request: TTSRequest):
                 "audio_base64": audio_base64,
                 "text_length": len(request.text),
                 "tts_provider": TTS_PROVIDER,
-                "message": "Audio generated successfully"
+                "smart_processing": True,
+                "message": "Smart mixed language audio generated successfully"
             }
         else:
             return {"error": "TTS conversion failed"}
         
     except Exception as e:
-        return {"error": f"TTS conversion failed: {str(e)}"}
+        return {"error": f"Smart TTS conversion failed: {str(e)}"}
 
+# ... (rest of the endpoints remain the same as previous version)
 # Text File Processing Endpoints
 @app.post("/process-text-file")
 async def process_text_file(request: TextFileRequest):
