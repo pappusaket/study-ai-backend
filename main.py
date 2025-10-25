@@ -214,6 +214,16 @@ def create_smart_tts_audio_base64(text, language="auto"):
             lang, segment_text = segments[0]
             if lang == "unknown":
                 lang = "hi"  # Default to Hindi for unknown
+                # Map custom language names to gTTS codes
+lang_map = {
+    "english": "en",
+    "hindi": "hi",
+    "mixed": "hi",
+    "unknown": "hi"
+}
+tts_lang = lang_map.get(lang.lower(), "hi")  # Default to Hindi
+tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
+
             tts = gTTS(text=segment_text, lang=lang, slow=False)
             audio_buffer = io.BytesIO()
             tts.write_to_fp(audio_buffer)
