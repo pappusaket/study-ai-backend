@@ -212,19 +212,15 @@ def create_smart_tts_audio_base64(text, language="auto"):
         # If only one segment, use simple TTS
         if len(segments) == 1:
             lang, segment_text = segments[0]
-            if lang == "unknown":
-                lang = "hi"  # Default to Hindi for unknown
-                # Map custom language names to gTTS codes
-lang_map = {
-    "english": "en",
-    "hindi": "hi",
-    "mixed": "hi",
-    "unknown": "hi"
-}
-tts_lang = lang_map.get(lang.lower(), "hi")  # Default to Hindi
-tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
-
-            tts = gTTS(text=segment_text, lang=lang, slow=False)
+            # Convert to gTTS language codes
+            if lang == "hindi" or lang == "mixed" or lang == "unknown":
+                tts_lang = "hi"  # Hindi
+            elif lang == "english":
+                tts_lang = "en"  # English
+            else:
+                tts_lang = "hi"  # Default to Hindi
+            
+            tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
             audio_buffer = io.BytesIO()
             tts.write_to_fp(audio_buffer)
             audio_buffer.seek(0)
@@ -238,20 +234,24 @@ tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
             if not segment_text.strip():
                 continue
                 
-            # Determine TTS language
-            if lang == "hindi":
-                tts_lang = "hi"
+            # Convert to gTTS language codes
+            if lang == "hindi" or lang == "mixed" or lang == "unknown":
+                tts_lang = "hi"  # Hindi
             elif lang == "english":
-                tts_lang = "en"
+                tts_lang = "en"  # English
             else:
-                tts_lang = "hi"  # Default to Hindi for mixed/unknown
+                tts_lang = "hi"  # Default to Hindi
             
             # Create TTS for this segment
-            tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
-            segment_buffer = io.BytesIO()
-            tts.write_to_fp(segment_buffer)
-            segment_buffer.seek(0)
-            audio_buffers.append(segment_buffer.getvalue())
+            try:
+                tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
+                segment_buffer = io.BytesIO()
+                tts.write_to_fp(segment_buffer)
+                segment_buffer.seek(0)
+                audio_buffers.append(segment_buffer.getvalue())
+            except Exception as e:
+                print(f"TTS error for segment '{segment_text}': {e}")
+                continue
         
         # Combine all audio segments
         if audio_buffers:
@@ -264,7 +264,7 @@ tts = gTTS(text=segment_text, lang=tts_lang, slow=False)
     except Exception as e:
         return None, f"Smart TTS conversion failed: {str(e)}"
 
-# Rest of the utility functions (same as before)
+# Database Utility Functions
 def extract_text_from_pdf(pdf_content):
     try:
         pdf_reader = PdfReader(io.BytesIO(pdf_content))
@@ -278,6 +278,7 @@ def extract_text_from_pdf(pdf_content):
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
 def find_relevant_text_simple(question, user_id):
+    """Simple keyword-based search for relevant text from both PDFs and text files"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -332,6 +333,7 @@ def find_relevant_text_simple(question, user_id):
     return relevant_sections[:3]
 
 def process_pdf_content(pdf_id, text_content):
+    """Store PDF text content"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -389,6 +391,7 @@ def get_user_pdfs(user_id):
     return pdfs
 
 def process_text_file_content(file_data: TextFileRequest):
+    """Process and store text file content from WordPress"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -430,6 +433,7 @@ def process_text_file_content(file_data: TextFileRequest):
         return {"status": "error", "message": str(e)}
 
 def get_user_text_files(user_id):
+    """Get all text files for a user"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -449,12 +453,19 @@ def get_user_text_files(user_id):
     return files
 
 def detect_language(question):
+    """Detect if question is in Hindi, English, or mixed"""
     hindi_pattern = re.compile(r'[अ-ह]')
+    
     has_hindi = bool(hindi_pattern.search(question))
-    return "hindi" if has_hindi else "english"
+    
+    if has_hindi:
+        return "hindi"
+    else:
+        return "english"
 
 def format_structured_answer(answer_text, is_hindi=False):
-    # ... (same format_structured_answer function as before)
+    """Convert AI response into structured HTML format with blue headings and TTS button"""
+    
     # Clean the response
     answer_text = answer_text.strip()
     
@@ -496,14 +507,22 @@ def format_structured_answer(answer_text, is_hindi=False):
         sections = [{"heading": "उत्तर" if is_hindi else "Answer", "content": answer_text}]
     
     # Generate HTML with blue headings and TTS button
-    tts_button = '''
-    <div style="margin: 15px 0; text-align: center;">
-        <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
-            🔊 सुनें / Listen
-        </button>
-        <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
-    </div>
-    '''
+    tts_button = ''
+    if TTS_AVAILABLE:
+        tts_button = '''
+        <div style="margin: 15px 0; text-align: center;">
+            <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
+                🔊 सुनें / Listen
+            </button>
+            <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
+        </div>
+        '''
+    else:
+        tts_button = '''
+        <div style="margin: 15px 0; text-align: center; color: #666; font-size: 12px;">
+            🔊 TTS Feature Currently Unavailable
+        </div>
+        '''
     
     html_output = tts_button
     
@@ -543,63 +562,64 @@ def format_structured_answer(answer_text, is_hindi=False):
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
     
     # Add JavaScript for TTS functionality
-    html_output += '''
-    <script>
-    function speakAnswer() {
-        const answerDiv = document.getElementById('pappu-ai-answer');
-        const statusSpan = document.getElementById('tts-status');
-        const answerText = answerDiv.innerText || answerDiv.textContent;
-        
-        statusSpan.textContent = 'Loading...';
-        
-        // Remove the TTS button text from the speech content
-        const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
-        
-        fetch('https://study-ai-backend-fylo.onrender.com/text-to-speech', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                text: speechText,
-                language: 'auto'
+    if TTS_AVAILABLE:
+        html_output += '''
+        <script>
+        function speakAnswer() {
+            const answerDiv = document.getElementById('pappu-ai-answer');
+            const statusSpan = document.getElementById('tts-status');
+            const answerText = answerDiv.innerText || answerDiv.textContent;
+            
+            statusSpan.textContent = 'Loading...';
+            
+            // Remove the TTS button text from the speech content
+            const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
+            
+            fetch('https://study-ai-backend-fylo.onrender.com/text-to-speech', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text: speechText,
+                    language: 'auto'
+                })
             })
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            return response.json();
-        })
-        .then(data => {
-            if (data.audio_base64) {
-                statusSpan.textContent = 'Playing...';
-                
-                // Create audio from base64
-                const audio = new Audio('data:audio/mp3;base64,' + data.audio_base64);
-                audio.play();
-                
-                audio.onended = function() {
-                    statusSpan.textContent = 'Completed';
-                    setTimeout(() => {
-                        statusSpan.textContent = '';
-                    }, 2000);
-                };
-                
-                audio.onerror = function() {
-                    statusSpan.textContent = 'Audio error';
-                };
-            } else {
-                statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
-            }
-        })
-        .catch(error => {
-            console.error('TTS Error:', error);
-            statusSpan.textContent = 'Error: ' + error.message;
-        });
-    }
-    </script>
-    '''
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.audio_base64) {
+                    statusSpan.textContent = 'Playing...';
+                    
+                    // Create audio from base64
+                    const audio = new Audio('data:audio/mp3;base64,' + data.audio_base64);
+                    audio.play();
+                    
+                    audio.onended = function() {
+                        statusSpan.textContent = 'Completed';
+                        setTimeout(() => {
+                            statusSpan.textContent = '';
+                        }, 2000);
+                    };
+                    
+                    audio.onerror = function() {
+                        statusSpan.textContent = 'Audio error';
+                    };
+                } else {
+                    statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
+                }
+            })
+            .catch(error => {
+                console.error('TTS Error:', error);
+                statusSpan.textContent = 'Error: ' + error.message;
+            });
+        }
+        </script>
+        '''
     
     return html_output
 
@@ -608,10 +628,11 @@ async def root():
     return {
         "status": "active", 
         "service": "Study AI - Smart Mixed Language TTS",
-        "version": "2.9",
-        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Smart Mixed Language TTS"],
+        "version": "3.0",
+        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Smart Mixed Language TTS", "Structured Answers"],
         "tts_available": TTS_AVAILABLE,
-        "tts_provider": TTS_PROVIDER
+        "tts_provider": TTS_PROVIDER,
+        "backend_url": "https://study-ai-backend-fylo.onrender.com"
     }
 
 @app.get("/health")
@@ -625,7 +646,7 @@ async def health():
         "tts_available": TTS_AVAILABLE,
         "smart_tts": True,
         "languages": ["auto", "hindi", "english", "mixed"],
-        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Smart Mixed Language TTS"]
+        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Smart Mixed Language TTS", "Blue Headings"]
     }
 
 @app.post("/ask")
@@ -727,7 +748,7 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
-# TTS Endpoint - Now with smart mixed language processing
+# TTS Endpoint - Smart mixed language processing
 @app.post("/text-to-speech")
 async def text_to_speech(request: TTSRequest):
     """Convert text to speech with smart mixed language detection"""
@@ -755,7 +776,6 @@ async def text_to_speech(request: TTSRequest):
     except Exception as e:
         return {"error": f"Smart TTS conversion failed: {str(e)}"}
 
-# ... (rest of the endpoints remain the same as previous version)
 # Text File Processing Endpoints
 @app.post("/process-text-file")
 async def process_text_file(request: TextFileRequest):
@@ -797,7 +817,7 @@ async def get_user_text_files_list(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# Existing PDF endpoints
+# PDF Upload Endpoints
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), description: str = Form("")):
     if not file.filename.endswith('.pdf'):
@@ -843,6 +863,7 @@ async def get_user_pdfs_list(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
+# Simple Q&A Endpoint for WordPress
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True, language: str = "auto"):
     """Simple GET endpoint for WordPress plugin - Returns structured answers"""
@@ -859,6 +880,7 @@ async def ask_simple(question: str, user_id: str = "default", use_context: bool 
     except Exception as e:
         return {"error": str(e)}
 
+# Delete Endpoints
 @app.delete("/delete-pdf/{pdf_id}")
 async def delete_pdf(pdf_id: int, user_id: str):
     """Delete a PDF and its content"""
