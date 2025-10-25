@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional
 import re
 
-app = FastAPI(title="Study AI - Structured Answers Q&A")
+app = FastAPI(title="Study AI - Hindi+English Structured Answers")
 
 # CORS
 app.add_middleware(
@@ -78,6 +78,7 @@ class QuestionRequest(BaseModel):
     question: str
     user_id: str = "default"
     use_pdf_context: bool = True
+    language: str = "auto"  # auto, hindi, english
 
 class TextFileRequest(BaseModel):
     file_id: int
@@ -283,6 +284,21 @@ def get_user_text_files(user_id):
     conn.close()
     return files
 
+def detect_language(question):
+    """Detect if question is in Hindi, English, or mixed"""
+    hindi_pattern = re.compile(r'[अ-ह]')
+    english_pattern = re.compile(r'[a-zA-Z]')
+    
+    has_hindi = bool(hindi_pattern.search(question))
+    has_english = bool(english_pattern.search(question))
+    
+    if has_hindi and has_english:
+        return "mixed"
+    elif has_hindi:
+        return "hindi"
+    else:
+        return "english"
+
 def format_structured_answer(answer_text):
     """Convert AI response into structured HTML format with blue headings"""
     
@@ -298,10 +314,13 @@ def format_structured_answer(answer_text):
     for line in lines:
         line = line.strip()
         
-        # Detect headings (lines that end with colon or are short and bold)
+        # Detect headings (lines that end with colon or are short and contain key phrases)
         if (line.endswith(':') or 
-            (len(line) < 50 and any(keyword in line.lower() for keyword in 
-                                   ['what is', 'definition', 'key', 'types', 'examples', 'formula', 'units', 'requirements', 'characteristics', 'advantages', 'disadvantages']))):
+            (len(line) < 60 and any(keyword in line.lower() for keyword in 
+                                   ['what is', 'definition', 'key', 'types', 'examples', 'formula', 'units', 
+                                    'requirements', 'characteristics', 'advantages', 'disadvantages',
+                                    'परिभाषा', 'प्रकार', 'उदाहरण', 'फॉर्मूला', 'इकाई', 'आवश्यकताएं', 
+                                    'विशेषताएं', 'फायदे', 'नुकसान', 'महत्वपूर्ण']))):
             
             # Save previous section if exists
             if current_section["heading"]:
@@ -340,18 +359,20 @@ def format_structured_answer(answer_text):
             lines = content.split('. ')
             formatted_lines = []
             for line in lines:
-                if line.strip().startswith('-') or line.strip().startswith('*'):
-                    formatted_lines.append(f'<li>{line.strip().lstrip("-* ")}</li>')
+                line = line.strip()
+                if line.startswith('-') or line.startswith('*') or line.startswith('•'):
+                    formatted_lines.append(f'<li>{line.lstrip("-*• ")}</li>')
                 else:
                     formatted_lines.append(line)
             
-            if any(line.startswith('<li>') for line in formatted_lines):
+            if any('<li>' in line or line.startswith('<li>') for line in formatted_lines):
                 html_output += '<ul style="margin-top: 0; margin-bottom: 12px;">'
                 for line in formatted_lines:
                     if line.startswith('<li>'):
                         html_output += line
                     else:
-                        html_output += f'<li>{line}</li>'
+                        if line:
+                            html_output += f'<li>{line}</li>'
                 html_output += '</ul>'
             else:
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
@@ -362,19 +383,20 @@ def format_structured_answer(answer_text):
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - Structured Answers Q&A",
-        "version": "2.1",
-        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Blue Headings"]
+        "service": "Study AI - Hindi+English Structured Answers",
+        "version": "2.2",
+        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Hindi+English Support", "Blue Headings"]
     }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Structured Answers Q&A",
+        "service": "Study AI - Hindi+English Structured Answers",
         "gemini": "configured",
         "database": "connected",
-        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings"]
+        "languages": ["auto", "hindi", "english", "mixed"],
+        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings", "Bilingual Answers"]
     }
 
 @app.post("/ask")
@@ -385,6 +407,11 @@ async def ask_question(request: QuestionRequest):
     try:
         context = ""
         sources_used = 0
+        detected_language = request.language
+        
+        # Auto-detect language if not specified
+        if request.language == "auto":
+            detected_language = detect_language(request.question)
         
         if request.use_pdf_context:
             relevant_sections = find_relevant_text_simple(request.question, request.user_id)
@@ -397,30 +424,39 @@ async def ask_question(request: QuestionRequest):
                 context = "\n\nRelevant information from your files:\n" + "\n---\n".join(context_chunks)
                 sources_used = len(relevant_sections)
         
-        # Enhanced prompt for structured answers
+        # Enhanced prompt for bilingual structured answers
+        language_instruction = ""
+        if detected_language == "hindi":
+            language_instruction = "Please answer in Hindi (हिंदी में उत्तर दें)."
+        elif detected_language == "mixed":
+            language_instruction = "Please answer in a mix of Hindi and English (Hinglish) - use Hindi for explanations and English for technical terms."
+        else:
+            language_instruction = "Please answer in English."
+        
         if context:
             prompt = f"""
-            You are a helpful study assistant. Answer the following question in a well-structured format with clear sections and headings.
-
+            You are a helpful study assistant. {language_instruction}
+            
             QUESTION: {request.question}
 
             {context}
 
             Please provide a comprehensive answer with the following structure:
             - Start with a clear definition/overview
-            - Use section headings for key aspects
+            - Use section headings for key aspects in both Hindi and English if mixed language
             - Include bullet points for lists
             - Use bold for important terms
             - End with a simple example if applicable
+            - Make the answer easy to understand for students
 
-            Make sure to use clear headings that describe each section.
+            Use clear headings that describe each section.
 
             ANSWER:
             """
         else:
             prompt = f"""
-            You are a helpful study assistant. Answer the following question in a well-structured format with clear sections and headings.
-
+            You are a helpful study assistant. {language_instruction}
+            
             QUESTION: {request.question}
 
             Please provide a comprehensive answer with:
@@ -429,6 +465,7 @@ async def ask_question(request: QuestionRequest):
             - Bullet points for lists
             - Bold text for important terms
             - Simple example if applicable
+            - Make it student-friendly and easy to understand
 
             Use proper section headings to organize the content.
 
@@ -444,12 +481,14 @@ async def ask_question(request: QuestionRequest):
         return {
             "question": request.question,
             "answer": formatted_answer,
-            "raw_answer": response.text,  # Keep original for reference
+            "raw_answer": response.text,
             "status": "success",
             "context_used": sources_used > 0,
             "sources_used": sources_used,
             "search_method": "keyword_based",
-            "format": "structured_html"
+            "format": "structured_html",
+            "detected_language": detected_language,
+            "language_used": detected_language
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -542,12 +581,17 @@ async def get_user_pdfs_list(user_id: str):
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/ask-simple")
-async def ask_simple(question: str, user_id: str = "default", use_context: bool = True):
-    """Simple GET endpoint for WordPress plugin - Returns structured answers"""
+async def ask_simple(question: str, user_id: str = "default", use_context: bool = True, language: str = "auto"):
+    """Simple GET endpoint for WordPress plugin - Returns structured bilingual answers"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
-        request = QuestionRequest(question=question, user_id=user_id, use_pdf_context=use_context)
+        request = QuestionRequest(
+            question=question, 
+            user_id=user_id, 
+            use_pdf_context=use_context,
+            language=language
+        )
         return await ask_question(request)
     except Exception as e:
         return {"error": str(e)}
