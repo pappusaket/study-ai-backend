@@ -12,25 +12,25 @@ from datetime import datetime
 from typing import Optional
 import re
 
-app = FastAPI(title="Study AI - Simple PDF Q&A")
+app = FastAPI(title="Study AI - Structured Answers Q&A")
 
-# CORS - Render के लिए updated
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Production में specific domains add करें
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure APIs - Render environment variables के लिए
+# Configure APIs
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Database setup - Render persistent storage के लिए
+# Database setup
 DB_PATH = os.path.join(os.getcwd(), "study_ai.db")
 
 def init_db():
@@ -52,7 +52,6 @@ def init_db():
         )
     ''')
     
-    # New table for text files from WordPress media
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS text_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +113,6 @@ def find_relevant_text_simple(question, user_id):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Get all processed PDFs for user
     cursor.execute('''
         SELECT text_content, filename 
         FROM pdf_files 
@@ -123,7 +121,6 @@ def find_relevant_text_simple(question, user_id):
     
     pdfs = cursor.fetchall()
     
-    # Get all text files for user
     cursor.execute('''
         SELECT text_content, filename 
         FROM text_files 
@@ -139,7 +136,6 @@ def find_relevant_text_simple(question, user_id):
     if not all_files:
         return []
     
-    # Simple keyword matching
     question_keywords = set(re.findall(r'\w+', question.lower()))
     relevant_sections = []
     
@@ -147,18 +143,16 @@ def find_relevant_text_simple(question, user_id):
         if not text_content:
             continue
             
-        # Split text into sentences
         sentences = re.split(r'[.!?]+', text_content)
         
         for sentence in sentences:
-            if len(sentence.strip()) < 10:  # Skip very short sentences
+            if len(sentence.strip()) < 10:
                 continue
                 
             sentence_keywords = set(re.findall(r'\w+', sentence.lower()))
             common_keywords = question_keywords.intersection(sentence_keywords)
             
-            # If enough keywords match, consider it relevant
-            if len(common_keywords) >= 2:  # At least 2 common keywords
+            if len(common_keywords) >= 2:
                 relevance_score = len(common_keywords) / len(question_keywords)
                 relevant_sections.append({
                     'text': sentence.strip(),
@@ -166,7 +160,6 @@ def find_relevant_text_simple(question, user_id):
                     'score': relevance_score
                 })
     
-    # Sort by relevance and return top 3
     relevant_sections.sort(key=lambda x: x['score'], reverse=True)
     return relevant_sections[:3]
 
@@ -228,7 +221,6 @@ def get_user_pdfs(user_id):
     conn.close()
     return pdfs
 
-# New functions for text file processing
 def process_text_file_content(file_data: TextFileRequest):
     """Process and store text file content from WordPress"""
     try:
@@ -237,7 +229,6 @@ def process_text_file_content(file_data: TextFileRequest):
         
         file_hash = hashlib.md5(file_data.content.encode()).hexdigest()
         
-        # Check if already exists
         cursor.execute('SELECT id FROM text_files WHERE file_hash = ? AND user_id = ?', 
                       (file_hash, file_data.user_id))
         existing = cursor.fetchone()
@@ -246,7 +237,6 @@ def process_text_file_content(file_data: TextFileRequest):
             conn.close()
             return {"status": "duplicate", "file_id": existing[0]}
         
-        # Insert new text file
         cursor.execute('''
             INSERT INTO text_files 
             (wordpress_file_id, filename, file_hash, user_id, description, upload_date, file_size, text_content, file_type)
@@ -293,23 +283,98 @@ def get_user_text_files(user_id):
     conn.close()
     return files
 
+def format_structured_answer(answer_text):
+    """Convert AI response into structured HTML format with blue headings"""
+    
+    # Clean the response
+    answer_text = answer_text.strip()
+    
+    # Split into sections based on common heading patterns
+    sections = []
+    current_section = {"heading": "", "content": ""}
+    
+    lines = answer_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Detect headings (lines that end with colon or are short and bold)
+        if (line.endswith(':') or 
+            (len(line) < 50 and any(keyword in line.lower() for keyword in 
+                                   ['what is', 'definition', 'key', 'types', 'examples', 'formula', 'units', 'requirements', 'characteristics', 'advantages', 'disadvantages']))):
+            
+            # Save previous section if exists
+            if current_section["heading"]:
+                sections.append(current_section.copy())
+            
+            # Start new section
+            current_section = {"heading": line.replace('**', '').replace('*', '').replace(':', '').strip(), "content": ""}
+        else:
+            # Add to current section content
+            if line:
+                current_section["content"] += line + " "
+    
+    # Add the last section
+    if current_section["heading"]:
+        sections.append(current_section)
+    
+    # If no sections detected, create a default structure
+    if not sections:
+        sections = [{"heading": "Answer", "content": answer_text}]
+    
+    # Generate HTML with blue headings
+    html_output = ""
+    for section in sections:
+        if section["heading"]:
+            html_output += f'<h3 style="color: #2563eb; font-weight: bold; margin-bottom: 8px;">{section["heading"]}</h3>'
+        
+        if section["content"]:
+            # Format lists and bullet points
+            content = section["content"].strip()
+            
+            # Convert markdown-style lists to HTML
+            content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
+            content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', content)
+            
+            # Handle bullet points
+            lines = content.split('. ')
+            formatted_lines = []
+            for line in lines:
+                if line.strip().startswith('-') or line.strip().startswith('*'):
+                    formatted_lines.append(f'<li>{line.strip().lstrip("-* ")}</li>')
+                else:
+                    formatted_lines.append(line)
+            
+            if any(line.startswith('<li>') for line in formatted_lines):
+                html_output += '<ul style="margin-top: 0; margin-bottom: 12px;">'
+                for line in formatted_lines:
+                    if line.startswith('<li>'):
+                        html_output += line
+                    else:
+                        html_output += f'<li>{line}</li>'
+                html_output += '</ul>'
+            else:
+                html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
+    
+    return html_output
+
 @app.get("/")
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - PDF & Text File Q&A",
-        "version": "2.0",
-        "features": ["PDF Processing", "Text File Support", "WordPress Integration"]
+        "service": "Study AI - Structured Answers Q&A",
+        "version": "2.1",
+        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Blue Headings"]
     }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - PDF & Text File Q&A",
-        "gemini": "configured" if GEMINI_API_KEY else "not_configured",
+        "service": "Study AI - Structured Answers Q&A",
+        "gemini": "configured",
         "database": "connected",
-        "features": ["Smart Q&A", "PDF Context", "Text File Support", "Keyword Search"]
+        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings"]
     }
 
 @app.post("/ask")
@@ -321,7 +386,6 @@ async def ask_question(request: QuestionRequest):
         context = ""
         sources_used = 0
         
-        # If context is enabled, find relevant content
         if request.use_pdf_context:
             relevant_sections = find_relevant_text_simple(request.question, request.user_id)
             
@@ -333,30 +397,40 @@ async def ask_question(request: QuestionRequest):
                 context = "\n\nRelevant information from your files:\n" + "\n---\n".join(context_chunks)
                 sources_used = len(relevant_sections)
         
-        # Create smart prompt with context
+        # Enhanced prompt for structured answers
         if context:
             prompt = f"""
-            You are a helpful study assistant. Use the provided context from the user's files to answer their question accurately.
+            You are a helpful study assistant. Answer the following question in a well-structured format with clear sections and headings.
 
             QUESTION: {request.question}
 
             {context}
 
-            Please provide a comprehensive answer that:
-            1. Directly addresses the question
-            2. Uses relevant information from the provided context when applicable
-            3. Explains concepts clearly for better understanding
-            4. If the context doesn't contain relevant information, use your general knowledge but mention this
+            Please provide a comprehensive answer with the following structure:
+            - Start with a clear definition/overview
+            - Use section headings for key aspects
+            - Include bullet points for lists
+            - Use bold for important terms
+            - End with a simple example if applicable
+
+            Make sure to use clear headings that describe each section.
 
             ANSWER:
             """
         else:
             prompt = f"""
-            You are a helpful study assistant. Answer the following question clearly and concisely.
+            You are a helpful study assistant. Answer the following question in a well-structured format with clear sections and headings.
 
             QUESTION: {request.question}
 
-            Provide a comprehensive answer that would help a student understand the concept.
+            Please provide a comprehensive answer with:
+            - Clear definition/overview section
+            - Key points in organized sections
+            - Bullet points for lists
+            - Bold text for important terms
+            - Simple example if applicable
+
+            Use proper section headings to organize the content.
 
             ANSWER:
             """
@@ -364,13 +438,18 @@ async def ask_question(request: QuestionRequest):
         model = genai.GenerativeModel('gemini-2.0-flash-001')
         response = model.generate_content(prompt)
         
+        # Format the answer with structured HTML
+        formatted_answer = format_structured_answer(response.text)
+        
         return {
             "question": request.question,
-            "answer": response.text,
+            "answer": formatted_answer,
+            "raw_answer": response.text,  # Keep original for reference
             "status": "success",
             "context_used": sources_used > 0,
             "sources_used": sources_used,
-            "search_method": "keyword_based"
+            "search_method": "keyword_based",
+            "format": "structured_html"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -416,7 +495,7 @@ async def get_user_text_files_list(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# Existing PDF endpoints (unchanged)
+# Existing PDF endpoints
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), description: str = Form("")):
     if not file.filename.endswith('.pdf'):
@@ -431,11 +510,9 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Form(...), des
     if pdf_id is None:
         return {"status": "duplicate", "message": "PDF already uploaded"}
     
-    # Extract and process text
     text_content = extract_text_from_pdf(file_content)
     word_count = len(text_content.split()) if text_content else 0
     
-    # Store PDF content for context search
     processed = False
     if text_content:
         processed = process_pdf_content(pdf_id, text_content)
@@ -466,7 +543,7 @@ async def get_user_pdfs_list(user_id: str):
 
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True):
-    """Simple GET endpoint for WordPress plugin"""
+    """Simple GET endpoint for WordPress plugin - Returns structured answers"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
@@ -482,14 +559,12 @@ async def delete_pdf(pdf_id: int, user_id: str):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Check if PDF exists and belongs to user
         cursor.execute('SELECT id FROM pdf_files WHERE id = ? AND user_id = ?', (pdf_id, user_id))
         pdf_info = cursor.fetchone()
         
         if not pdf_info:
             raise HTTPException(status_code=404, detail="PDF not found")
         
-        # Delete from database
         cursor.execute('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
         conn.commit()
         conn.close()
@@ -506,14 +581,12 @@ async def delete_text_file(file_id: int, user_id: str):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Check if file exists and belongs to user
         cursor.execute('SELECT id FROM text_files WHERE id = ? AND user_id = ?', (file_id, user_id))
         file_info = cursor.fetchone()
         
         if not file_info:
             raise HTTPException(status_code=404, detail="Text file not found")
         
-        # Delete from database
         cursor.execute('DELETE FROM text_files WHERE id = ?', (file_id,))
         conn.commit()
         conn.close()
@@ -523,7 +596,7 @@ async def delete_text_file(file_id: int, user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting text file: {str(e)}")
 
-# Render deployment के लिए important
+# Render deployment
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
