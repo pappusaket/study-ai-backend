@@ -427,7 +427,7 @@ def format_structured_answer(answer_text, is_hindi=False):
             // Remove the TTS button text from the speech content
             const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
             
-            fetch('/text-to-speech', {
+            fetch('https://study-ai-backend-fylo.onrender.com/text-to-speech', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
