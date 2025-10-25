@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional
 import re
 
-app = FastAPI(title="Study AI - Hindi+English Structured Answers")
+app = FastAPI(title="Study AI - Pure Hindi + English Technical Terms")
 
 # CORS
 app.add_middleware(
@@ -320,7 +320,7 @@ def format_structured_answer(answer_text):
                                    ['what is', 'definition', 'key', 'types', 'examples', 'formula', 'units', 
                                     'requirements', 'characteristics', 'advantages', 'disadvantages',
                                     'परिभाषा', 'प्रकार', 'उदाहरण', 'फॉर्मूला', 'इकाई', 'आवश्यकताएं', 
-                                    'विशेषताएं', 'फायदे', 'नुकसान', 'महत्वपूर्ण']))):
+                                    'विशेषताएं', 'फायदे', 'नुकसान', 'महत्वपूर्ण', 'प्रक्रिया', 'कार्य']))):
             
             # Save previous section if exists
             if current_section["heading"]:
@@ -383,20 +383,20 @@ def format_structured_answer(answer_text):
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - Hindi+English Structured Answers",
-        "version": "2.2",
-        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Hindi+English Support", "Blue Headings"]
+        "service": "Study AI - Pure Hindi + English Technical Terms",
+        "version": "2.3",
+        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Pure Hindi Answers", "English Technical Terms"]
     }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Hindi+English Structured Answers",
+        "service": "Study AI - Pure Hindi + English Technical Terms",
         "gemini": "configured",
         "database": "connected",
-        "languages": ["auto", "hindi", "english", "mixed"],
-        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings", "Bilingual Answers"]
+        "languages": ["auto", "hindi", "english"],
+        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings", "Pure Hindi with English Terms"]
     }
 
 @app.post("/ask")
@@ -424,26 +424,39 @@ async def ask_question(request: QuestionRequest):
                 context = "\n\nRelevant information from your files:\n" + "\n---\n".join(context_chunks)
                 sources_used = len(relevant_sections)
         
-        # Enhanced prompt for bilingual structured answers
+        # Enhanced prompt for pure Hindi with English technical terms
         language_instruction = ""
-        if detected_language == "hindi":
-            language_instruction = "Please answer in Hindi (हिंदी में उत्तर दें)."
-        elif detected_language == "mixed":
-            language_instruction = "Please answer in a mix of Hindi and English (Hinglish) - use Hindi for explanations and English for technical terms."
+        if detected_language == "hindi" or detected_language == "mixed":
+            language_instruction = """
+            Please answer in PURE HINDI (शुद्ध हिंदी में उत्तर दें).
+            
+            IMPORTANT INSTRUCTIONS FOR HINDI ANSWERS:
+            1. Write entire answer in Hindi (हिंदी में)
+            2. For technical/scientific terms: First write Hindi term, then English term in brackets
+            3. Format: प्रकाश संश्लेषण (Photosynthesis), कार्य (Work), ऊर्जा (Energy)
+            4. Use proper Hindi headings and structure
+            5. Make it easy to understand for students
+            
+            EXAMPLE FORMAT:
+            प्रकाश संश्लेषण (Photosynthesis) क्या है?
+            प्रकाश संश्लेषण (Photosynthesis) पौधों की वह प्रक्रिया है...
+            """
         else:
-            language_instruction = "Please answer in English."
+            language_instruction = "Please answer in English with clear structure and explanations."
         
         if context:
             prompt = f"""
-            You are a helpful study assistant. {language_instruction}
+            You are a helpful study assistant for Indian students.
             
             QUESTION: {request.question}
 
             {context}
 
+            {language_instruction}
+
             Please provide a comprehensive answer with the following structure:
             - Start with a clear definition/overview
-            - Use section headings for key aspects in both Hindi and English if mixed language
+            - Use section headings for key aspects
             - Include bullet points for lists
             - Use bold for important terms
             - End with a simple example if applicable
@@ -455,9 +468,11 @@ async def ask_question(request: QuestionRequest):
             """
         else:
             prompt = f"""
-            You are a helpful study assistant. {language_instruction}
+            You are a helpful study assistant for Indian students.
             
             QUESTION: {request.question}
+
+            {language_instruction}
 
             Please provide a comprehensive answer with:
             - Clear definition/overview section
@@ -488,7 +503,7 @@ async def ask_question(request: QuestionRequest):
             "search_method": "keyword_based",
             "format": "structured_html",
             "detected_language": detected_language,
-            "language_used": detected_language
+            "language_used": "hindi" if detected_language in ["hindi", "mixed"] else "english"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
