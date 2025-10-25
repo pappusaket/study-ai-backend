@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional
 import re
 
-app = FastAPI(title="Study AI - Pure Hindi + English Technical Terms")
+app = FastAPI(title="Study AI - Pure Hindi Answers with English Terms")
 
 # CORS
 app.add_middleware(
@@ -287,19 +287,15 @@ def get_user_text_files(user_id):
 def detect_language(question):
     """Detect if question is in Hindi, English, or mixed"""
     hindi_pattern = re.compile(r'[अ-ह]')
-    english_pattern = re.compile(r'[a-zA-Z]')
     
     has_hindi = bool(hindi_pattern.search(question))
-    has_english = bool(english_pattern.search(question))
     
-    if has_hindi and has_english:
-        return "mixed"
-    elif has_hindi:
+    if has_hindi:
         return "hindi"
     else:
         return "english"
 
-def format_structured_answer(answer_text):
+def format_structured_answer(answer_text, is_hindi=False):
     """Convert AI response into structured HTML format with blue headings"""
     
     # Clean the response
@@ -314,20 +310,21 @@ def format_structured_answer(answer_text):
     for line in lines:
         line = line.strip()
         
-        # Detect headings (lines that end with colon or are short and contain key phrases)
-        if (line.endswith(':') or 
+        # Detect headings for both Hindi and English
+        if (line.endswith(':') or line.endswith('?') or
             (len(line) < 60 and any(keyword in line.lower() for keyword in 
                                    ['what is', 'definition', 'key', 'types', 'examples', 'formula', 'units', 
                                     'requirements', 'characteristics', 'advantages', 'disadvantages',
                                     'परिभाषा', 'प्रकार', 'उदाहरण', 'फॉर्मूला', 'इकाई', 'आवश्यकताएं', 
-                                    'विशेषताएं', 'फायदे', 'नुकसान', 'महत्वपूर्ण', 'प्रक्रिया', 'कार्य']))):
+                                    'विशेषताएं', 'फायदे', 'नुकसान', 'महत्वपूर्ण', 'प्रक्रिया', 'कार्य',
+                                    'क्या है', 'मतलब']))):
             
             # Save previous section if exists
             if current_section["heading"]:
                 sections.append(current_section.copy())
             
             # Start new section
-            current_section = {"heading": line.replace('**', '').replace('*', '').replace(':', '').strip(), "content": ""}
+            current_section = {"heading": line.replace('**', '').replace('*', '').replace(':', '').replace('?', '').strip(), "content": ""}
         else:
             # Add to current section content
             if line:
@@ -339,7 +336,7 @@ def format_structured_answer(answer_text):
     
     # If no sections detected, create a default structure
     if not sections:
-        sections = [{"heading": "Answer", "content": answer_text}]
+        sections = [{"heading": "उत्तर" if is_hindi else "Answer", "content": answer_text}]
     
     # Generate HTML with blue headings
     html_output = ""
@@ -360,8 +357,9 @@ def format_structured_answer(answer_text):
             formatted_lines = []
             for line in lines:
                 line = line.strip()
-                if line.startswith('-') or line.startswith('*') or line.startswith('•'):
-                    formatted_lines.append(f'<li>{line.lstrip("-*• ")}</li>')
+                if line.startswith('-') or line.startswith('*') or line.startswith('•') or ' - ' in line[:20]:
+                    line_content = line.lstrip("-*• ")
+                    formatted_lines.append(f'<li>{line_content}</li>')
                 else:
                     formatted_lines.append(line)
             
@@ -371,7 +369,7 @@ def format_structured_answer(answer_text):
                     if line.startswith('<li>'):
                         html_output += line
                     else:
-                        if line:
+                        if line and not line.startswith('<'):
                             html_output += f'<li>{line}</li>'
                 html_output += '</ul>'
             else:
@@ -383,20 +381,20 @@ def format_structured_answer(answer_text):
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - Pure Hindi + English Technical Terms",
-        "version": "2.3",
-        "features": ["PDF Processing", "Text File Support", "Structured Answers", "Pure Hindi Answers", "English Technical Terms"]
+        "service": "Study AI - Pure Hindi Answers",
+        "version": "2.4",
+        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "English Technical Terms", "Structured Format"]
     }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Pure Hindi + English Technical Terms",
+        "service": "Study AI - Pure Hindi Answers",
         "gemini": "configured",
         "database": "connected",
         "languages": ["auto", "hindi", "english"],
-        "features": ["Structured Q&A", "PDF Context", "Text File Support", "Blue Headings", "Pure Hindi with English Terms"]
+        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Blue Headings", "Hindi + English Terms"]
     }
 
 @app.post("/ask")
@@ -425,54 +423,41 @@ async def ask_question(request: QuestionRequest):
                 sources_used = len(relevant_sections)
         
         # Enhanced prompt for pure Hindi with English technical terms
-        language_instruction = ""
-        if detected_language == "hindi" or detected_language == "mixed":
-            language_instruction = """
-            Please answer in PURE HINDI (शुद्ध हिंदी में उत्तर दें).
-            
-            IMPORTANT INSTRUCTIONS FOR HINDI ANSWERS:
-            1. Write entire answer in Hindi (हिंदी में)
-            2. For technical/scientific terms: First write Hindi term, then English term in brackets
-            3. Format: प्रकाश संश्लेषण (Photosynthesis), कार्य (Work), ऊर्जा (Energy)
-            4. Use proper Hindi headings and structure
-            5. Make it easy to understand for students
-            
-            EXAMPLE FORMAT:
-            प्रकाश संश्लेषण (Photosynthesis) क्या है?
-            प्रकाश संश्लेषण (Photosynthesis) पौधों की वह प्रक्रिया है...
-            """
-        else:
-            language_instruction = "Please answer in English with clear structure and explanations."
-        
-        if context:
+        if detected_language == "hindi":
             prompt = f"""
-            You are a helpful study assistant for Indian students.
-            
-            QUESTION: {request.question}
+            तुम एक helpful study assistant हो। निम्नलिखित प्रश्न का उत्तर पूरी तरह से हिंदी में दो।
+
+            प्रश्न: {request.question}
 
             {context}
 
-            {language_instruction}
+            **बहुत महत्वपूर्ण निर्देश:**
+            1. पूरा उत्तर केवल हिंदी में लिखो
+            2. तकनीकी/वैज्ञानिक शब्दों के लिए: पहले हिंदी शब्द लिखो, फिर कोष्ठक में अंग्रेजी शब्द लिखो
+            3. फॉर्मेट: प्रकाश संश्लेषण (Photosynthesis), कार्बन डाइऑक्साइड (Carbon Dioxide), जल (Water)
+            4. उत्तर को अच्छी तरह से संरचित करो - परिभाषा, मुख्य बिंदु, उदाहरण के अनुभागों में
+            5. बुलेट पॉइंट्स का उपयोग करो
+            6. महत्वपूर्ण शब्दों को बोल्ड करो
+            7. उत्तर छात्रों के लिए आसानी से समझने योग्य बनाओ
 
-            Please provide a comprehensive answer with the following structure:
-            - Start with a clear definition/overview
-            - Use section headings for key aspects
-            - Include bullet points for lists
-            - Use bold for important terms
-            - End with a simple example if applicable
-            - Make the answer easy to understand for students
+            **उदाहरण फॉर्मेट:**
+            **प्रकाश संश्लेषण (Photosynthesis) क्या है?**
+            प्रकाश संश्लेषण (Photosynthesis) पौधों की वह प्रक्रिया है जिसमें...
+            
+            **मुख्य चरण:**
+            • प्रकाश ऊर्जा (Light Energy) का अवशोषण
+            • कार्बन डाइऑक्साइड (Carbon Dioxide) का उपयोग
+            • ग्लूकोज (Glucose) का निर्माण
 
-            Use clear headings that describe each section.
-
-            ANSWER:
+            उत्तर:
             """
         else:
             prompt = f"""
-            You are a helpful study assistant for Indian students.
-            
+            You are a helpful study assistant. Answer the following question in English with clear structure.
+
             QUESTION: {request.question}
 
-            {language_instruction}
+            {context}
 
             Please provide a comprehensive answer with:
             - Clear definition/overview section
@@ -491,7 +476,7 @@ async def ask_question(request: QuestionRequest):
         response = model.generate_content(prompt)
         
         # Format the answer with structured HTML
-        formatted_answer = format_structured_answer(response.text)
+        formatted_answer = format_structured_answer(response.text, is_hindi=(detected_language == "hindi"))
         
         return {
             "question": request.question,
@@ -503,7 +488,7 @@ async def ask_question(request: QuestionRequest):
             "search_method": "keyword_based",
             "format": "structured_html",
             "detected_language": detected_language,
-            "language_used": "hindi" if detected_language in ["hindi", "mixed"] else "english"
+            "language_used": "hindi" if detected_language == "hindi" else "english"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
@@ -597,7 +582,7 @@ async def get_user_pdfs_list(user_id: str):
 
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True, language: str = "auto"):
-    """Simple GET endpoint for WordPress plugin - Returns structured bilingual answers"""
+    """Simple GET endpoint for WordPress plugin - Returns structured answers"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
