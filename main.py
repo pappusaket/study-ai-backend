@@ -26,21 +26,12 @@ try:
     print("✓ gTTS loaded successfully")
 except ImportError as e:
     print(f"✗ gTTS not available: {e}")
-    # Try alternative TTS methods
-    try:
-        # Check if we can use system TTS or other methods
-        import pyttsx3
-        TTS_AVAILABLE = True
-        TTS_PROVIDER = "pyttsx3"
-        print("✓ pyttsx3 loaded as fallback")
-    except ImportError:
-        print("✗ pyttsx3 also not available")
-        TTS_AVAILABLE = False
-        TTS_PROVIDER = "none"
+    TTS_AVAILABLE = False
+    TTS_PROVIDER = "none"
 
-app = FastAPI(title="Study AI - Hindi+English Answers with TTS")
+app = FastAPI(title="Study AI - Hindi+English Answers")
 
-# CORS
+# CORS - All origins allow for testing
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -369,14 +360,22 @@ def format_structured_answer(answer_text, is_hindi=False):
         sections = [{"heading": "उत्तर" if is_hindi else "Answer", "content": answer_text}]
     
     # Generate HTML with blue headings and TTS button
-    tts_button = '''
-    <div style="margin: 15px 0; text-align: center;">
-        <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
-            🔊 सुनें / Listen
-        </button>
-        <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
-    </div>
-    '''
+    tts_button = ''
+    if TTS_AVAILABLE:
+        tts_button = '''
+        <div style="margin: 15px 0; text-align: center;">
+            <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
+                🔊 सुनें / Listen
+            </button>
+            <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
+        </div>
+        '''
+    else:
+        tts_button = '''
+        <div style="margin: 15px 0; text-align: center; color: #666; font-size: 12px;">
+            🔊 TTS Feature Currently Unavailable
+        </div>
+        '''
     
     html_output = tts_button
     
@@ -416,56 +415,66 @@ def format_structured_answer(answer_text, is_hindi=False):
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
     
     # Add JavaScript for TTS functionality
-    html_output += '''
-    <script>
-    function speakAnswer() {
-        const answerDiv = document.getElementById('pappu-ai-answer');
-        const statusSpan = document.getElementById('tts-status');
-        const answerText = answerDiv.innerText || answerDiv.textContent;
-        
-        statusSpan.textContent = 'Loading...';
-        
-        // Remove the TTS button text from the speech content
-        const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
-        
-        fetch('/text-to-speech', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                text: speechText,
-                language: 'auto'
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.audio_url) {
-                statusSpan.textContent = 'Playing...';
-                const audio = new Audio(data.audio_url);
-                audio.play();
-                
-                audio.onended = function() {
-                    statusSpan.textContent = 'Completed';
-                    setTimeout(() => {
-                        statusSpan.textContent = '';
-                    }, 2000);
-                };
-                
-                audio.onerror = function() {
-                    statusSpan.textContent = 'Error playing audio';
-                };
-            } else {
-                statusSpan.textContent = 'Error: ' + data.error;
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            statusSpan.textContent = 'Network error';
-        });
-    }
-    </script>
-    '''
+    if TTS_AVAILABLE:
+        html_output += f'''
+        <script>
+        function speakAnswer() {{
+            const answerDiv = document.getElementById('pappu-ai-answer');
+            const statusSpan = document.getElementById('tts-status');
+            const answerText = answerDiv.innerText || answerDiv.textContent;
+            
+            statusSpan.textContent = 'Loading...';
+            
+            // Remove the TTS button text from the speech content
+            const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
+            
+            // Use absolute URL for TTS endpoint
+            const ttsUrl = '{os.getenv("BACKEND_URL", "https://your-app.onrender.com")}/text-to-speech';
+            
+            fetch(ttsUrl, {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                }},
+                body: JSON.stringify({{
+                    text: speechText,
+                    language: 'auto'
+                }})
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    throw new Error(`HTTP error! status: ${{response.status}}`);
+                }}
+                return response.json();
+            }})
+            .then(data => {{
+                if (data.audio_url) {{
+                    statusSpan.textContent = 'Playing...';
+                    const audioUrl = '{os.getenv("BACKEND_URL", "https://your-app.onrender.com")}' + data.audio_url;
+                    const audio = new Audio(audioUrl);
+                    audio.play();
+                    
+                    audio.onended = function() {{
+                        statusSpan.textContent = 'Completed';
+                        setTimeout(() => {{
+                            statusSpan.textContent = '';
+                        }}, 2000);
+                    }};
+                    
+                    audio.onerror = function() {{
+                        statusSpan.textContent = 'Audio error';
+                    }};
+                }} else {{
+                    statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
+                }}
+            }})
+            .catch(error => {{
+                console.error('TTS Error:', error);
+                statusSpan.textContent = 'Network error: ' + error.message;
+            }});
+        }}
+        </script>
+        '''
     
     return html_output
 
@@ -506,22 +515,6 @@ def create_tts_audio(text, language="auto"):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
                 tts.save(temp_audio.name)
                 return temp_audio.name, None
-                
-        elif TTS_PROVIDER == "pyttsx3":
-            # Use pyttsx3 (system TTS)
-            import pyttsx3
-            engine = pyttsx3.init()
-            
-            # Set properties
-            engine.setProperty('rate', 150)  # Speed percent
-            engine.setProperty('volume', 0.9)  # Volume 0-1
-            
-            # Save to file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
-                engine.save_to_file(clean_text, temp_audio.name)
-                engine.runAndWait()
-                return temp_audio.name, None
-                
         else:
             return None, "No TTS provider available"
             
@@ -530,11 +523,13 @@ def create_tts_audio(text, language="auto"):
 
 @app.get("/")
 async def root():
+    backend_url = os.getenv("BACKEND_URL", "https://your-app.onrender.com")
     return {
         "status": "active", 
-        "service": "Study AI - Hindi+English Answers with TTS",
-        "version": "2.6",
-        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "TTS Support", "Structured Format"],
+        "service": "Study AI - Hindi+English Answers",
+        "version": "2.7",
+        "backend_url": backend_url,
+        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Structured Format"],
         "tts_available": TTS_AVAILABLE,
         "tts_provider": TTS_PROVIDER
     }
@@ -543,13 +538,13 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Hindi+English Answers with TTS",
+        "service": "Study AI - Hindi+English Answers",
         "gemini": "configured",
         "database": "connected",
         "tts": TTS_PROVIDER,
         "tts_available": TTS_AVAILABLE,
         "languages": ["auto", "hindi", "english"],
-        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "TTS", "Blue Headings"]
+        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Blue Headings"]
     }
 
 @app.post("/ask")
@@ -777,7 +772,7 @@ async def get_user_pdfs_list(user_id: str):
 
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True, language: str = "auto"):
-    """Simple GET endpoint for WordPress plugin - Returns structured answers with TTS"""
+    """Simple GET endpoint for WordPress plugin - Returns structured answers"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
