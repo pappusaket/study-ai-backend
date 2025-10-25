@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import google.generativeai as genai
 import hashlib
@@ -11,12 +11,8 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 import re
-import json
-import tempfile
-from gtts import gTTS
-import base64
 
-app = FastAPI(title="Study AI - Hindi+English Answers with TTS")
+app = FastAPI(title="Study AI - Pure Hindi Answers with English Terms")
 
 # CORS
 app.add_middleware(
@@ -90,10 +86,6 @@ class TextFileRequest(BaseModel):
     content: str
     user_id: str
     file_type: str = "text"
-
-class TTSRequest(BaseModel):
-    text: str
-    language: str = "hi"  # hi for Hindi, en for English
 
 class PDFInfo(BaseModel):
     id: int
@@ -304,7 +296,7 @@ def detect_language(question):
         return "english"
 
 def format_structured_answer(answer_text, is_hindi=False):
-    """Convert AI response into structured HTML format with blue headings and TTS button"""
+    """Convert AI response into structured HTML format with blue headings"""
     
     # Clean the response
     answer_text = answer_text.strip()
@@ -346,18 +338,8 @@ def format_structured_answer(answer_text, is_hindi=False):
     if not sections:
         sections = [{"heading": "उत्तर" if is_hindi else "Answer", "content": answer_text}]
     
-    # Generate HTML with blue headings and TTS button
-    tts_button = '''
-    <div style="margin: 15px 0; text-align: center;">
-        <button onclick="speakAnswer()" style="background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 14px;">
-            🔊 सुनें / Listen
-        </button>
-        <span id="tts-status" style="margin-left: 10px; font-size: 12px; color: #666;"></span>
-    </div>
-    '''
-    
-    html_output = tts_button
-    
+    # Generate HTML with blue headings
+    html_output = ""
     for section in sections:
         if section["heading"]:
             html_output += f'<h3 style="color: #2563eb; font-weight: bold; margin-bottom: 8px;">{section["heading"]}</h3>'
@@ -393,92 +375,26 @@ def format_structured_answer(answer_text, is_hindi=False):
             else:
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
     
-    # Add JavaScript for TTS functionality
-    html_output += '''
-    <script>
-    function speakAnswer() {
-        const answerDiv = document.getElementById('pappu-ai-answer');
-        const statusSpan = document.getElementById('tts-status');
-        const answerText = answerDiv.innerText || answerDiv.textContent;
-        
-        statusSpan.textContent = 'Loading...';
-        
-        // Remove the TTS button text from the speech content
-        const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').trim();
-        
-        // Detect language for TTS
-        const hasHindi = /[अ-ह]/.test(speechText);
-        const language = hasHindi ? 'hi' : 'en';
-        
-        fetch('/text-to-speech', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                text: speechText,
-                language: language
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.audio_url) {
-                statusSpan.textContent = 'Playing...';
-                const audio = new Audio(data.audio_url);
-                audio.play();
-                
-                audio.onended = function() {
-                    statusSpan.textContent = 'Completed';
-                    setTimeout(() => {
-                        statusSpan.textContent = '';
-                    }, 2000);
-                };
-                
-                audio.onerror = function() {
-                    statusSpan.textContent = 'Error playing audio';
-                };
-            } else {
-                statusSpan.textContent = 'Error: ' + data.error;
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            statusSpan.textContent = 'Network error';
-        });
-    }
-    </script>
-    '''
-    
     return html_output
-
-def clean_text_for_tts(text):
-    """Clean text for TTS by removing HTML tags and special formatting"""
-    # Remove HTML tags
-    clean_text = re.sub(r'<[^>]*>', '', text)
-    # Remove extra spaces and newlines
-    clean_text = re.sub(r'\s+', ' ', clean_text)
-    # Remove special characters but keep Hindi and English text
-    clean_text = re.sub(r'[^\w\sअ-ह\.\,\?\!]', '', clean_text)
-    return clean_text.strip()
 
 @app.get("/")
 async def root():
     return {
         "status": "active", 
-        "service": "Study AI - Hindi+English Answers with TTS",
-        "version": "2.5",
-        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "TTS Support", "Structured Format"]
+        "service": "Study AI - Pure Hindi Answers",
+        "version": "2.4",
+        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "English Technical Terms", "Structured Format"]
     }
 
 @app.get("/health")
 async def health():
     return {
         "status": "healthy",
-        "service": "Study AI - Hindi+English Answers with TTS",
+        "service": "Study AI - Pure Hindi Answers",
         "gemini": "configured",
         "database": "connected",
         "languages": ["auto", "hindi", "english"],
-        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "TTS", "Blue Headings"]
+        "features": ["Pure Hindi Q&A", "PDF Context", "Text File Support", "Blue Headings", "Hindi + English Terms"]
     }
 
 @app.post("/ask")
@@ -559,75 +475,23 @@ async def ask_question(request: QuestionRequest):
         model = genai.GenerativeModel('gemini-2.0-flash-001')
         response = model.generate_content(prompt)
         
-        # Format the answer with structured HTML and TTS button
+        # Format the answer with structured HTML
         formatted_answer = format_structured_answer(response.text, is_hindi=(detected_language == "hindi"))
         
         return {
             "question": request.question,
             "answer": formatted_answer,
             "raw_answer": response.text,
-            "clean_text": clean_text_for_tts(response.text),  # For TTS
             "status": "success",
             "context_used": sources_used > 0,
             "sources_used": sources_used,
             "search_method": "keyword_based",
             "format": "structured_html",
             "detected_language": detected_language,
-            "language_used": "hindi" if detected_language == "hindi" else "english",
-            "tts_available": True
+            "language_used": "hindi" if detected_language == "hindi" else "english"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
-
-# TTS Endpoint
-@app.post("/text-to-speech")
-async def text_to_speech(request: TTSRequest):
-    """Convert text to speech using gTTS"""
-    try:
-        if not request.text or len(request.text.strip()) == 0:
-            return {"error": "No text provided"}
-        
-        # Clean the text
-        clean_text = clean_text_for_tts(request.text)
-        
-        if len(clean_text) > 5000:
-            clean_text = clean_text[:5000] + "..."
-        
-        # Determine language for TTS
-        tts_language = request.language
-        if tts_language == "auto":
-            has_hindi = re.search(r'[अ-ह]', clean_text)
-            tts_language = "hi" if has_hindi else "en"
-        
-        # Create TTS
-        tts = gTTS(text=clean_text, lang=tts_language, slow=False)
-        
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
-            tts.save(temp_audio.name)
-            temp_file_path = temp_audio.name
-        
-        # Return the file path (in production, you might want to serve this differently)
-        return {
-            "audio_url": f"/tts-audio/{os.path.basename(temp_file_path)}",
-            "text_length": len(clean_text),
-            "language": tts_language
-        }
-        
-    except Exception as e:
-        return {"error": f"TTS conversion failed: {str(e)}"}
-
-@app.get("/tts-audio/{filename}")
-async def get_tts_audio(filename: str):
-    """Serve TTS audio files"""
-    try:
-        file_path = os.path.join(tempfile.gettempdir(), filename)
-        if os.path.exists(file_path):
-            return FileResponse(file_path, media_type="audio/mpeg", filename="speech.mp3")
-        else:
-            raise HTTPException(status_code=404, detail="Audio file not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error serving audio: {str(e)}")
 
 # Text File Processing Endpoints
 @app.post("/process-text-file")
@@ -718,7 +582,7 @@ async def get_user_pdfs_list(user_id: str):
 
 @app.get("/ask-simple")
 async def ask_simple(question: str, user_id: str = "default", use_context: bool = True, language: str = "auto"):
-    """Simple GET endpoint for WordPress plugin - Returns structured answers with TTS"""
+    """Simple GET endpoint for WordPress plugin - Returns structured answers"""
     if not GEMINI_API_KEY:
         return {"error": "Gemini API key not configured"}
     try:
