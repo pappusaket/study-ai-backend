@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import google.generativeai as genai
 import hashlib
@@ -12,10 +12,9 @@ from datetime import datetime
 from typing import Optional
 import re
 import tempfile
-import requests
-import json
+import base64
 
-# TTS setup with multiple fallbacks
+# TTS setup
 TTS_AVAILABLE = False
 TTS_PROVIDER = "none"
 
@@ -31,7 +30,7 @@ except ImportError as e:
 
 app = FastAPI(title="Study AI - Hindi+English Answers")
 
-# CORS - All origins allow for testing
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -95,7 +94,7 @@ class QuestionRequest(BaseModel):
     question: str
     user_id: str = "default"
     use_pdf_context: bool = True
-    language: str = "auto"  # auto, hindi, english
+    language: str = "auto"
 
 class TextFileRequest(BaseModel):
     file_id: int
@@ -106,7 +105,7 @@ class TextFileRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    language: str = "auto"  # auto, hi, en
+    language: str = "auto"
 
 class PDFInfo(BaseModel):
     id: int
@@ -131,7 +130,7 @@ def extract_text_from_pdf(pdf_content):
         raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
 def find_relevant_text_simple(question, user_id):
-    """Simple keyword-based search for relevant text from both PDFs and text files"""
+    """Simple keyword-based search for relevant text"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -416,9 +415,9 @@ def format_structured_answer(answer_text, is_hindi=False):
     
     # Add JavaScript for TTS functionality
     if TTS_AVAILABLE:
-        html_output += f'''
+        html_output += '''
         <script>
-        function speakAnswer() {{
+        function speakAnswer() {
             const answerDiv = document.getElementById('pappu-ai-answer');
             const statusSpan = document.getElementById('tts-status');
             const answerText = answerDiv.innerText || answerDiv.textContent;
@@ -428,51 +427,49 @@ def format_structured_answer(answer_text, is_hindi=False):
             // Remove the TTS button text from the speech content
             const speechText = answerText.replace('सुनें / Listen', '').replace('Loading...', '').replace('TTS Feature Currently Unavailable', '').trim();
             
-            // Use absolute URL for TTS endpoint
-            const ttsUrl = '{os.getenv("BACKEND_URL", "https://your-app.onrender.com")}/text-to-speech';
-            
-            fetch(ttsUrl, {{
+            fetch('/text-to-speech', {
                 method: 'POST',
-                headers: {{
+                headers: {
                     'Content-Type': 'application/json',
-                }},
-                body: JSON.stringify({{
+                },
+                body: JSON.stringify({
                     text: speechText,
                     language: 'auto'
-                }})
-            }})
-            .then(response => {{
-                if (!response.ok) {{
-                    throw new Error(`HTTP error! status: ${{response.status}}`);
-                }}
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 return response.json();
-            }})
-            .then(data => {{
-                if (data.audio_url) {{
+            })
+            .then(data => {
+                if (data.audio_base64) {
                     statusSpan.textContent = 'Playing...';
-                    const audioUrl = '{os.getenv("BACKEND_URL", "https://your-app.onrender.com")}' + data.audio_url;
-                    const audio = new Audio(audioUrl);
+                    
+                    // Create audio from base64
+                    const audio = new Audio('data:audio/mp3;base64,' + data.audio_base64);
                     audio.play();
                     
-                    audio.onended = function() {{
+                    audio.onended = function() {
                         statusSpan.textContent = 'Completed';
-                        setTimeout(() => {{
+                        setTimeout(() => {
                             statusSpan.textContent = '';
-                        }}, 2000);
-                    }};
+                        }, 2000);
+                    };
                     
-                    audio.onerror = function() {{
+                    audio.onerror = function() {
                         statusSpan.textContent = 'Audio error';
-                    }};
-                }} else {{
+                    };
+                } else {
                     statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
-                }}
-            }})
-            .catch(error => {{
+                }
+            })
+            .catch(error => {
                 console.error('TTS Error:', error);
-                statusSpan.textContent = 'Network error: ' + error.message;
-            }});
-        }}
+                statusSpan.textContent = 'Error: ' + error.message;
+            });
+        }
         </script>
         '''
     
@@ -488,8 +485,8 @@ def clean_text_for_tts(text):
     clean_text = re.sub(r'[^\w\sअ-ह\.\,\?\!]', '', clean_text)
     return clean_text.strip()
 
-def create_tts_audio(text, language="auto"):
-    """Create TTS audio using available methods"""
+def create_tts_audio_base64(text, language="auto"):
+    """Create TTS audio and return as base64 string"""
     if not TTS_AVAILABLE:
         return None, "TTS not available"
     
@@ -508,13 +505,17 @@ def create_tts_audio(text, language="auto"):
             tts_language = language
         
         if TTS_PROVIDER == "gtts":
-            # Use gTTS
+            # Use gTTS and get audio as bytes
             tts = gTTS(text=clean_text, lang=tts_language, slow=False)
             
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
-                tts.save(temp_audio.name)
-                return temp_audio.name, None
+            # Save to bytes buffer instead of file
+            audio_buffer = io.BytesIO()
+            tts.write_to_fp(audio_buffer)
+            audio_buffer.seek(0)
+            
+            # Convert to base64
+            audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
+            return audio_base64, None
         else:
             return None, "No TTS provider available"
             
@@ -523,12 +524,10 @@ def create_tts_audio(text, language="auto"):
 
 @app.get("/")
 async def root():
-    backend_url = os.getenv("BACKEND_URL", "https://your-app.onrender.com")
     return {
         "status": "active", 
         "service": "Study AI - Hindi+English Answers",
-        "version": "2.7",
-        "backend_url": backend_url,
+        "version": "2.8",
         "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "Structured Format"],
         "tts_available": TTS_AVAILABLE,
         "tts_provider": TTS_PROVIDER
@@ -645,43 +644,32 @@ async def ask_question(request: QuestionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
-# TTS Endpoint
+# TTS Endpoint - Now returns base64 audio directly
 @app.post("/text-to-speech")
 async def text_to_speech(request: TTSRequest):
-    """Convert text to speech"""
+    """Convert text to speech and return base64 audio"""
     try:
         if not request.text or len(request.text.strip()) == 0:
             return {"error": "No text provided"}
         
-        # Create TTS audio
-        audio_file, error = create_tts_audio(request.text, request.language)
+        # Create TTS audio as base64
+        audio_base64, error = create_tts_audio_base64(request.text, request.language)
         
         if error:
             return {"error": error}
         
-        if audio_file:
+        if audio_base64:
             return {
-                "audio_url": f"/tts-audio/{os.path.basename(audio_file)}",
+                "audio_base64": audio_base64,
                 "text_length": len(request.text),
-                "tts_provider": TTS_PROVIDER
+                "tts_provider": TTS_PROVIDER,
+                "message": "Audio generated successfully"
             }
         else:
             return {"error": "TTS conversion failed"}
         
     except Exception as e:
         return {"error": f"TTS conversion failed: {str(e)}"}
-
-@app.get("/tts-audio/{filename}")
-async def get_tts_audio(filename: str):
-    """Serve TTS audio files"""
-    try:
-        file_path = os.path.join(tempfile.gettempdir(), filename)
-        if os.path.exists(file_path):
-            return FileResponse(file_path, media_type="audio/mpeg", filename="speech.mp3")
-        else:
-            raise HTTPException(status_code=404, detail="Audio file not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error serving audio: {str(e)}")
 
 # Text File Processing Endpoints
 @app.post("/process-text-file")
