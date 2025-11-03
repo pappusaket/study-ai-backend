@@ -14,13 +14,7 @@ from typing import Optional
 import re
 import secrets
 import logging
-import aiosqlite
 import asyncio
-import magic
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-import tempfile
 
 # Configure logging
 logging.basicConfig(
@@ -30,11 +24,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Study AI - SpeechSynthesis TTS")
-
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
 app.add_middleware(
@@ -55,39 +44,12 @@ class Settings:
         self.api_secret_key = os.getenv("API_SECRET_KEY", "default-secret-key-change-in-production")
         self.database_url = os.getenv("DATABASE_URL", "study_ai.db")
         self.max_file_size = 50 * 1024 * 1024  # 50MB
-        self.allowed_file_types = ["application/pdf", "text/plain"]
         
         if not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY environment variable not set")
 
 settings = Settings()
 genai.configure(api_key=settings.gemini_api_key)
-
-# Database Manager
-class DatabaseManager:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._lock = asyncio.Lock()
-    
-    async def get_connection(self):
-        return await aiosqlite.connect(self.db_path)
-    
-    async def execute_query(self, query: str, params: tuple = None):
-        async with self._lock:
-            async with self.get_connection() as conn:
-                cursor = await conn.execute(query, params or ())
-                await conn.commit()
-                return await cursor.fetchall()
-    
-    async def execute_write(self, query: str, params: tuple = None):
-        async with self._lock:
-            async with self.get_connection() as conn:
-                cursor = await conn.execute(query, params or ())
-                await conn.commit()
-                return cursor.lastrowid
-
-# Initialize database manager
-db_manager = DatabaseManager(settings.database_url)
 
 # Authentication
 async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -111,57 +73,60 @@ async def custom_http_exception_handler(request: Request, exc: CustomHTTPExcepti
     )
 
 # Initialize Database
-async def init_db():
-    """Initialize database asynchronously"""
+def init_db():
+    """Initialize database"""
     try:
-        async with aiosqlite.connect(settings.database_url) as db:
-            # PDF files table
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS pdf_files (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    filename TEXT NOT NULL,
-                    file_hash TEXT UNIQUE NOT NULL,
-                    user_id TEXT NOT NULL,
-                    description TEXT,
-                    upload_date TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    file_size INTEGER,
-                    processed BOOLEAN DEFAULT FALSE,
-                    text_content TEXT
-                )
-            ''')
-            
-            # Text files table
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS text_files (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    wordpress_file_id INTEGER,
-                    filename TEXT NOT NULL,
-                    file_hash TEXT UNIQUE NOT NULL,
-                    user_id TEXT NOT NULL,
-                    description TEXT,
-                    upload_date TEXT NOT NULL,
-                    file_size INTEGER,
-                    processed BOOLEAN DEFAULT TRUE,
-                    text_content TEXT,
-                    file_type TEXT
-                )
-            ''')
-            
-            # Usage logs table
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS usage_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT NOT NULL,
-                    endpoint TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    ip_address TEXT,
-                    user_agent TEXT
-                )
-            ''')
-            
-            await db.commit()
-            logger.info("Database initialized successfully")
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        
+        # PDF files table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pdf_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                file_hash TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                description TEXT,
+                upload_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                file_size INTEGER,
+                processed BOOLEAN DEFAULT FALSE,
+                text_content TEXT
+            )
+        ''')
+        
+        # Text files table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS text_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wordpress_file_id INTEGER,
+                filename TEXT NOT NULL,
+                file_hash TEXT UNIQUE NOT NULL,
+                user_id TEXT NOT NULL,
+                description TEXT,
+                upload_date TEXT NOT NULL,
+                file_size INTEGER,
+                processed BOOLEAN DEFAULT TRUE,
+                text_content TEXT,
+                file_type TEXT
+            )
+        ''')
+        
+        # Usage logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
@@ -169,7 +134,7 @@ async def init_db():
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    await init_db()
+    init_db()
     logger.info("Study AI Application started successfully")
 
 # Pydantic Models
@@ -209,24 +174,30 @@ def extract_text_from_pdf(pdf_content):
         logger.error(f"PDF extraction error: {e}")
         raise CustomHTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
-def validate_file_type(file_content: bytes) -> bool:
-    """Validate file type using python-magic"""
+def validate_pdf_file(file_content: bytes) -> bool:
+    """Validate PDF file"""
     try:
-        file_type = magic.from_buffer(file_content, mime=True)
-        return file_type in settings.allowed_file_types
+        # Basic PDF validation - check if it starts with PDF header
+        return file_content.startswith(b'%PDF')
     except Exception as e:
-        logger.error(f"File type validation error: {e}")
+        logger.error(f"File validation error: {e}")
         return False
 
 async def log_usage(user_id: str, endpoint: str, request: Request):
     """Log API usage"""
     try:
-        await db_manager.execute_write('''
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
             INSERT INTO usage_logs (user_id, endpoint, timestamp, ip_address, user_agent)
             VALUES (?, ?, ?, ?, ?)
         ''', (user_id, endpoint, datetime.now().isoformat(), 
               request.client.host if request.client else None,
               request.headers.get("user-agent")))
+        
+        conn.commit()
+        conn.close()
     except Exception as e:
         logger.error(f"Usage logging failed: {e}")
 
@@ -289,43 +260,59 @@ def find_relevant_text_simple(question, user_id):
         logger.error(f"Relevant text search error: {e}")
         return []
 
-async def process_pdf_content(pdf_id, text_content):
+def process_pdf_content(pdf_id, text_content):
     """Store PDF text content"""
     try:
-        await db_manager.execute_write(
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        
+        cursor.execute(
             'UPDATE pdf_files SET processed = TRUE, text_content = ? WHERE id = ?',
             (text_content, pdf_id)
         )
+        
+        conn.commit()
+        conn.close()
         return True
     except Exception as e:
         logger.error(f"Error storing PDF content: {e}")
         return False
 
-async def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
+def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
     try:
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        
         # Check for duplicate
-        result = await db_manager.execute_query(
-            'SELECT id FROM pdf_files WHERE file_hash = ?', (file_hash,)
-        )
-        if result:
-            return result[0][0]  # Return existing ID
+        cursor.execute('SELECT id FROM pdf_files WHERE file_hash = ?', (file_hash,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            conn.close()
+            return existing[0]  # Return existing ID
         
         # Insert new PDF
-        pdf_id = await db_manager.execute_write('''
+        cursor.execute('''
             INSERT INTO pdf_files 
             (filename, file_hash, user_id, description, upload_date, status, file_size)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (filename, file_hash, user_id, description, 
               datetime.now().isoformat(), 'uploaded', file_size))
         
+        conn.commit()
+        pdf_id = cursor.lastrowid
+        conn.close()
+        
         return pdf_id
     except Exception as e:
         logger.error(f"Error adding PDF to database: {e}")
         raise CustomHTTPException(status_code=500, detail="Database error")
 
-async def get_user_pdfs(user_id):
+def get_user_pdfs(user_id):
     try:
-        result = await db_manager.execute_query('''
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        cursor.execute('''
             SELECT id, filename, description, upload_date, status, file_size, processed
             FROM pdf_files 
             WHERE user_id = ? 
@@ -333,33 +320,37 @@ async def get_user_pdfs(user_id):
         ''', (user_id,))
         
         pdfs = []
-        for row in result:
+        for row in cursor.fetchall():
             pdfs.append({
                 "id": row[0], "filename": row[1], "description": row[2],
                 "upload_date": row[3], "status": row[4], "file_size": row[5],
                 "processed": bool(row[6])
             })
+        conn.close()
         return pdfs
     except Exception as e:
         logger.error(f"Error getting user PDFs: {e}")
         return []
 
-async def process_text_file_content(file_data: TextFileRequest):
+def process_text_file_content(file_data: TextFileRequest):
     """Process and store text file content from WordPress"""
     try:
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        
         file_hash = hashlib.md5(file_data.content.encode()).hexdigest()
         
         # Check for duplicate
-        result = await db_manager.execute_query(
-            'SELECT id FROM text_files WHERE file_hash = ? AND user_id = ?', 
-            (file_hash, file_data.user_id)
-        )
+        cursor.execute('SELECT id FROM text_files WHERE file_hash = ? AND user_id = ?', 
+                      (file_hash, file_data.user_id))
+        existing = cursor.fetchone()
         
-        if result:
-            return {"status": "duplicate", "file_id": result[0][0]}
+        if existing:
+            conn.close()
+            return {"status": "duplicate", "file_id": existing[0]}
         
         # Insert new text file
-        file_id = await db_manager.execute_write('''
+        cursor.execute('''
             INSERT INTO text_files 
             (wordpress_file_id, filename, file_hash, user_id, description, upload_date, file_size, text_content, file_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -375,15 +366,21 @@ async def process_text_file_content(file_data: TextFileRequest):
             file_data.file_type
         ))
         
+        conn.commit()
+        file_id = cursor.lastrowid
+        conn.close()
+        
         return {"status": "success", "file_id": file_id}
     except Exception as e:
         logger.error(f"Error processing text file: {e}")
         return {"status": "error", "message": str(e)}
 
-async def get_user_text_files(user_id):
+def get_user_text_files(user_id):
     """Get all text files for a user"""
     try:
-        result = await db_manager.execute_query('''
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
+        cursor.execute('''
             SELECT id, filename, description, upload_date, file_size, file_type
             FROM text_files 
             WHERE user_id = ? 
@@ -391,11 +388,12 @@ async def get_user_text_files(user_id):
         ''', (user_id,))
         
         files = []
-        for row in result:
+        for row in cursor.fetchall():
             files.append({
                 "id": row[0], "filename": row[1], "description": row[2],
                 "upload_date": row[3], "file_size": row[4], "file_type": row[5]
             })
+        conn.close()
         return files
     except Exception as e:
         logger.error(f"Error getting user text files: {e}")
@@ -624,7 +622,8 @@ async def health_check(request: Request):
     
     # Check database
     try:
-        await db_manager.execute_query("SELECT 1")
+        conn = sqlite3.connect(settings.database_url)
+        conn.close()
         health_status["database"] = "connected"
     except Exception as e:
         health_status["database"] = "disconnected"
@@ -641,7 +640,7 @@ async def health_check(request: Request):
         logger.error(f"Gemini API health check failed: {e}")
     
     # System info
-    health_status["rate_limiting"] = "enabled"
+    health_status["rate_limiting"] = "disabled"  # Removed for simplicity
     health_status["authentication"] = "required"
     health_status["file_validation"] = "enabled"
     
@@ -649,7 +648,6 @@ async def health_check(request: Request):
     return health_status
 
 @app.post("/ask")
-@limiter.limit("10/minute")
 async def ask_question(request: Request, question_request: QuestionRequest):
     await log_usage(question_request.user_id, "ask", request)
     
@@ -752,13 +750,12 @@ async def ask_question(request: Request, question_request: QuestionRequest):
 
 # Text File Processing Endpoints
 @app.post("/process-text-file")
-@limiter.limit("5/minute")
 async def process_text_file(request: Request, file_data: TextFileRequest, auth: bool = Depends(verify_api_key)):
     """Process text files from WordPress media library"""
     await log_usage(file_data.user_id, "process_text_file", request)
     
     try:
-        result = await process_text_file_content(file_data)
+        result = process_text_file_content(file_data)
         
         if result["status"] == "duplicate":
             return {
@@ -788,7 +785,7 @@ async def get_user_text_files_list(request: Request, user_id: str, auth: bool = 
     await log_usage(user_id, "get_user_text_files", request)
     
     try:
-        files = await get_user_text_files(user_id)
+        files = get_user_text_files(user_id)
         return {
             "user_id": user_id,
             "files": files,
@@ -800,7 +797,6 @@ async def get_user_text_files_list(request: Request, user_id: str, auth: bool = 
 
 # PDF endpoints with enhanced security
 @app.post("/upload-pdf")
-@limiter.limit("3/minute")
 async def upload_pdf(
     request: Request,
     file: UploadFile = File(...),
@@ -821,12 +817,12 @@ async def upload_pdf(
         raise CustomHTTPException(status_code=400, detail="File too large. Maximum size is 50MB")
     
     # Validate file type
-    if not validate_file_type(file_content):
-        raise CustomHTTPException(status_code=400, detail="Invalid file type")
+    if not validate_pdf_file(file_content):
+        raise CustomHTTPException(status_code=400, detail="Invalid PDF file")
     
     file_hash = hashlib.md5(file_content).hexdigest()
     
-    pdf_id = await add_pdf_to_db(file.filename, file_hash, user_id, description, file_size)
+    pdf_id = add_pdf_to_db(file.filename, file_hash, user_id, description, file_size)
     
     if pdf_id is None:
         return {"status": "duplicate", "message": "PDF already uploaded"}
@@ -836,7 +832,7 @@ async def upload_pdf(
     
     processed = False
     if text_content:
-        processed = await process_pdf_content(pdf_id, text_content)
+        processed = process_pdf_content(pdf_id, text_content)
     
     return {
         "status": "success",
@@ -854,7 +850,7 @@ async def get_user_pdfs_list(request: Request, user_id: str, auth: bool = Depend
     await log_usage(user_id, "get_user_pdfs", request)
     
     try:
-        pdfs = await get_user_pdfs(user_id)
+        pdfs = get_user_pdfs(user_id)
         return {
             "user_id": user_id,
             "pdfs": pdfs,
@@ -866,7 +862,6 @@ async def get_user_pdfs_list(request: Request, user_id: str, auth: bool = Depend
         raise CustomHTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/ask-simple")
-@limiter.limit("10/minute")
 async def ask_simple(
     request: Request,
     question: str, 
@@ -897,15 +892,18 @@ async def delete_pdf(request: Request, pdf_id: int, user_id: str, auth: bool = D
     await log_usage(user_id, "delete_pdf", request)
     
     try:
-        result = await db_manager.execute_query(
-            'SELECT id FROM pdf_files WHERE id = ? AND user_id = ?', 
-            (pdf_id, user_id)
-        )
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
         
-        if not result:
+        cursor.execute('SELECT id FROM pdf_files WHERE id = ? AND user_id = ?', (pdf_id, user_id))
+        pdf_info = cursor.fetchone()
+        
+        if not pdf_info:
             raise CustomHTTPException(status_code=404, detail="PDF not found")
         
-        await db_manager.execute_write('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
+        cursor.execute('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
+        conn.commit()
+        conn.close()
         
         return {"status": "success", "message": "PDF deleted successfully"}
         
@@ -919,15 +917,18 @@ async def delete_text_file(request: Request, file_id: int, user_id: str, auth: b
     await log_usage(user_id, "delete_text_file", request)
     
     try:
-        result = await db_manager.execute_query(
-            'SELECT id FROM text_files WHERE id = ? AND user_id = ?', 
-            (file_id, user_id)
-        )
+        conn = sqlite3.connect(settings.database_url)
+        cursor = conn.cursor()
         
-        if not result:
+        cursor.execute('SELECT id FROM text_files WHERE id = ? AND user_id = ?', (file_id, user_id))
+        file_info = cursor.fetchone()
+        
+        if not file_info:
             raise CustomHTTPException(status_code=404, detail="Text file not found")
         
-        await db_manager.execute_write('DELETE FROM text_files WHERE id = ?', (file_id,))
+        cursor.execute('DELETE FROM text_files WHERE id = ?', (file_id,))
+        conn.commit()
+        conn.close()
         
         return {"status": "success", "message": "Text file deleted successfully"}
         
