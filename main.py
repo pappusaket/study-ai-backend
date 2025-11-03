@@ -14,7 +14,6 @@ from typing import Optional
 import re
 import secrets
 import logging
-import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -23,7 +22,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Study AI - SpeechSynthesis TTS")
+app = FastAPI(
+    title="Study AI - SpeechSynthesis TTS",
+    description="AI-powered study assistant with PDF processing and text-to-speech",
+    version="4.0"
+)
 
 # CORS
 app.add_middleware(
@@ -57,20 +60,6 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
         logger.warning(f"Invalid API key attempt: {credentials.credentials[:10]}...")
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
-
-# Custom Exception
-class CustomHTTPException(HTTPException):
-    def __init__(self, status_code: int, detail: str, error_code: str = None):
-        super().__init__(status_code=status_code, detail=detail)
-        self.error_code = error_code
-
-@app.exception_handler(CustomHTTPException)
-async def custom_http_exception_handler(request: Request, exc: CustomHTTPException):
-    logger.error(f"Error {exc.status_code}: {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.detail, "error_code": exc.error_code}
-    )
 
 # Initialize Database
 def init_db():
@@ -172,15 +161,13 @@ def extract_text_from_pdf(pdf_content):
         return text.strip()
     except Exception as e:
         logger.error(f"PDF extraction error: {e}")
-        raise CustomHTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"PDF reading error: {str(e)}")
 
 def validate_pdf_file(file_content: bytes) -> bool:
     """Validate PDF file"""
     try:
-        # Basic PDF validation - check if it starts with PDF header
         return file_content.startswith(b'%PDF')
-    except Exception as e:
-        logger.error(f"File validation error: {e}")
+    except Exception:
         return False
 
 async def log_usage(user_id: str, endpoint: str, request: Request):
@@ -306,7 +293,7 @@ def add_pdf_to_db(filename, file_hash, user_id, description, file_size):
         return pdf_id
     except Exception as e:
         logger.error(f"Error adding PDF to database: {e}")
-        raise CustomHTTPException(status_code=500, detail="Database error")
+        raise HTTPException(status_code=500, detail="Database error")
 
 def get_user_pdfs(user_id):
     try:
@@ -461,7 +448,7 @@ def format_structured_answer(answer_text, is_hindi=False):
     </div>
     '''
     
-    html_output = tts_button
+    html_output = f'<div id="pappu-ai-answer">{tts_button}'
     
     for section in sections:
         if section["heading"]:
@@ -497,6 +484,8 @@ def format_structured_answer(answer_text, is_hindi=False):
                 html_output += '</ul>'
             else:
                 html_output += f'<p style="margin-top: 0; margin-bottom: 12px;">{content}</p>'
+    
+    html_output += '</div>'
     
     # Add JavaScript for SpeechSynthesis TTS functionality
     html_output += '''
@@ -606,9 +595,20 @@ async def root():
         "status": "active", 
         "service": "Study AI - SpeechSynthesis TTS",
         "version": "4.0",
-        "features": ["PDF Processing", "Text File Support", "Pure Hindi Answers", "SpeechSynthesis TTS", "Enhanced Security"],
-        "tts_type": "browser_speech_synthesis",
-        "security": "api_key_required"
+        "features": [
+            "PDF Processing", 
+            "Text File Support", 
+            "Pure Hindi Answers", 
+            "SpeechSynthesis TTS", 
+            "Enhanced Security"
+        ],
+        "endpoints": {
+            "/ask": "Main Q&A endpoint",
+            "/ask-simple": "Simple GET endpoint for WordPress", 
+            "/upload-pdf": "Upload and process PDF files",
+            "/process-text-file": "Process text files from WordPress",
+            "/health": "System health check"
+        }
     }
 
 @app.get("/health")
@@ -639,8 +639,6 @@ async def health_check(request: Request):
         health_status["status"] = "degraded"
         logger.error(f"Gemini API health check failed: {e}")
     
-    # System info
-    health_status["rate_limiting"] = "disabled"  # Removed for simplicity
     health_status["authentication"] = "required"
     health_status["file_validation"] = "enabled"
     
@@ -652,7 +650,7 @@ async def ask_question(request: Request, question_request: QuestionRequest):
     await log_usage(question_request.user_id, "ask", request)
     
     if not settings.gemini_api_key:
-        raise CustomHTTPException(status_code=500, detail="Gemini API key not configured")
+        raise HTTPException(status_code=500, detail="Gemini API key not configured")
     
     try:
         context = ""
@@ -746,7 +744,7 @@ async def ask_question(request: Request, question_request: QuestionRequest):
         }
     except Exception as e:
         logger.error(f"Error processing question: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 
 # Text File Processing Endpoints
 @app.post("/process-text-file")
@@ -773,11 +771,11 @@ async def process_text_file(request: Request, file_data: TextFileRequest, auth: 
                 "file_type": file_data.file_type
             }
         else:
-            raise CustomHTTPException(status_code=500, detail=result["message"])
+            raise HTTPException(status_code=500, detail=result["message"])
             
     except Exception as e:
         logger.error(f"Error processing text file: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error processing text file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing text file: {str(e)}")
 
 @app.get("/user-text-files/{user_id}")
 async def get_user_text_files_list(request: Request, user_id: str, auth: bool = Depends(verify_api_key)):
@@ -793,7 +791,7 @@ async def get_user_text_files_list(request: Request, user_id: str, auth: bool = 
         }
     except Exception as e:
         logger.error(f"Error getting user text files: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 # PDF endpoints with enhanced security
 @app.post("/upload-pdf")
@@ -807,18 +805,18 @@ async def upload_pdf(
     await log_usage(user_id, "upload_pdf", request)
     
     if not file.filename.endswith('.pdf'):
-        raise CustomHTTPException(status_code=400, detail="Only PDF files allowed")
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
     
     file_content = await file.read()
     file_size = len(file_content)
     
     # Validate file size
     if file_size > settings.max_file_size:
-        raise CustomHTTPException(status_code=400, detail="File too large. Maximum size is 50MB")
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 50MB")
     
     # Validate file type
     if not validate_pdf_file(file_content):
-        raise CustomHTTPException(status_code=400, detail="Invalid PDF file")
+        raise HTTPException(status_code=400, detail="Invalid PDF file")
     
     file_hash = hashlib.md5(file_content).hexdigest()
     
@@ -859,7 +857,7 @@ async def get_user_pdfs_list(request: Request, user_id: str, auth: bool = Depend
         }
     except Exception as e:
         logger.error(f"Error getting user PDFs: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/ask-simple")
 async def ask_simple(
@@ -899,7 +897,7 @@ async def delete_pdf(request: Request, pdf_id: int, user_id: str, auth: bool = D
         pdf_info = cursor.fetchone()
         
         if not pdf_info:
-            raise CustomHTTPException(status_code=404, detail="PDF not found")
+            raise HTTPException(status_code=404, detail="PDF not found")
         
         cursor.execute('DELETE FROM pdf_files WHERE id = ?', (pdf_id,))
         conn.commit()
@@ -909,7 +907,7 @@ async def delete_pdf(request: Request, pdf_id: int, user_id: str, auth: bool = D
         
     except Exception as e:
         logger.error(f"Error deleting PDF: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error deleting PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting PDF: {str(e)}")
 
 @app.delete("/delete-text-file/{file_id}")
 async def delete_text_file(request: Request, file_id: int, user_id: str, auth: bool = Depends(verify_api_key)):
@@ -924,7 +922,7 @@ async def delete_text_file(request: Request, file_id: int, user_id: str, auth: b
         file_info = cursor.fetchone()
         
         if not file_info:
-            raise CustomHTTPException(status_code=404, detail="Text file not found")
+            raise HTTPException(status_code=404, detail="Text file not found")
         
         cursor.execute('DELETE FROM text_files WHERE id = ?', (file_id,))
         conn.commit()
@@ -934,7 +932,7 @@ async def delete_text_file(request: Request, file_id: int, user_id: str, auth: b
         
     except Exception as e:
         logger.error(f"Error deleting text file: {e}")
-        raise CustomHTTPException(status_code=500, detail=f"Error deleting text file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting text file: {str(e)}")
 
 # TTS Support Check Endpoint
 @app.get("/tts-support")
